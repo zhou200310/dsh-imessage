@@ -19,12 +19,15 @@ export interface SpectrumConnectionConfig {
 }
 
 /** Text-only inbound message accepted by the security filter. */
-/** One inbound image decoded from a provider attachment. */
-export interface InboundImage {
+/** Raster media types the DSH attachment store admits as images (ImageBlock). */
+export const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+/** One inbound attachment decoded from a provider message. */
+export interface InboundAttachment {
   /** Raw encoded bytes as received. */
   data: Uint8Array
-  /** Declared raster media type; only the DSH attachment store's accepted types pass. */
-  mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  /** Declared media type; drives whether this becomes an ImageBlock or a FileBlock. */
+  mimeType: string
   /** Provider display name, never interpreted as a path. */
   name?: string
 }
@@ -34,8 +37,8 @@ export interface SpectrumInboundMessage {
   id: string
   /** Plain inbound text (empty for an attachment-only message). */
   text: string
-  /** Inbound images carried by this message, in provider order. */
-  images?: readonly InboundImage[]
+  /** Inbound attachments carried by this message, in provider order. */
+  attachments?: readonly InboundAttachment[]
   /** Run work while Spectrum maintains typing state. */
   responding<T>(callback: () => Promise<T>): Promise<T>
   /** Send one plain-text iMessage to the same DM. */
@@ -340,9 +343,6 @@ function adaptSpectrum(
   }
 }
 
-/** Raster types the DSH attachment store accepts; other attachments stay unsupported. */
-const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
-
 async function* mapMessages(
   app: SpectrumInstance,
   config: SpectrumConnectionConfig,
@@ -351,17 +351,17 @@ async function* mapMessages(
     if (!acceptsInboundMessage(message, config)) continue
     const content = message.content
     let text = ''
-    let images: InboundImage[] | undefined
+    let attachments: InboundAttachment[] | undefined
     if (content.type === 'text') {
       text = content.text
     } else {
-      // Attachment-only message: decode the raster so the router can store it as an ImageBlock.
-      if (!SUPPORTED_IMAGE_TYPES.has(content.mimeType)) continue
+      // Attachment-only message: decode every attachment so the router can store it
+      // as an ImageBlock (raster) or a FileBlock (anything else).
       try {
         const buffer = await content.read()
-        images = [{
+        attachments = [{
           data: new Uint8Array(buffer),
-          mediaType: content.mimeType as InboundImage['mediaType'],
+          mimeType: content.mimeType,
           ...(content.name.length === 0 ? {} : { name: content.name }),
         }]
       } catch {
@@ -371,7 +371,7 @@ async function* mapMessages(
     yield {
       id: message.id,
       text,
-      ...(images === undefined ? {} : { images }),
+      ...(attachments === undefined ? {} : { attachments }),
       responding: callback => space.responding(callback),
       send: async (value) => {
         await space.send(value)

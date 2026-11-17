@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import { chunkText } from './chunks.js'
 import { parseCommand, type ParsedCommand } from './commands.js'
 import { markdownToPlainText } from './plaintext.js'
+import { IMAGE_MEDIA_TYPES } from './spectrum-runtime.js'
 import { PLUGIN_ID } from './constants.js'
 import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
@@ -95,8 +96,8 @@ export class SessionRouter {
     console.log("[imesg-diag] receive message:", JSON.stringify(message.text).slice(0, 80))
     if (this.closed) return
     const text = message.text.trim()
-    const hasImages = (message.images?.length ?? 0) > 0
-    if (text.length === 0 && !hasImages) return
+    const hasAttachments = (message.attachments?.length ?? 0) > 0
+    if (text.length === 0 && !hasAttachments) return
 
     if (!text.startsWith('/')) {
       const answered = this.interactions.answerBare(text)
@@ -193,18 +194,29 @@ export class SessionRouter {
     // dsh 0.2.x removed the catch-all 'plugin' source kind; a plain user source
     // is what the agent loop claims into the turn (unknown kinds are dropped).
     const content: ContentBlock[] = prompt.length === 0 ? [] : [{ type: 'text', text: prompt }]
-    for (const image of channel.images ?? []) {
+    for (const item of channel.attachments ?? []) {
       try {
-        const attachment = await this.ctx.attachments.saveImage({
-          data: image.data,
-          mediaType: image.mediaType,
-          ...(image.name === undefined ? {} : { name: image.name }),
-        })
-        content.push({ type: 'image', attachment })
+        if (IMAGE_MEDIA_TYPES.has(item.mimeType)) {
+          // Raster: store as a normalized image so the model sees actual pixels.
+          const attachment = await this.ctx.attachments.saveImage({
+            data: item.data,
+            mediaType: item.mimeType as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
+            ...(item.name === undefined ? {} : { name: item.name }),
+          })
+          content.push({ type: 'image', attachment })
+        } else {
+          // Anything else (video/pdf/audio/…): verbatim file, projected to handle text
+          // (name + byte size + read-only path) at request assembly.
+          const attachment = await this.ctx.attachments.saveFile({
+            data: item.data,
+            ...(item.name === undefined ? {} : { name: item.name }),
+          })
+          content.push({ type: 'file', attachment })
+        }
       } catch (error) {
-        // A refused image must not swallow the whole turn: tell the sender why.
-        console.error('[imesg] image rejected:', error instanceof Error ? error.message : String(error))
-        await this.send(channel, '这张图片没存进去（格式或大小不被接受），换成 jpg/png 再发一次？')
+        // One refused attachment must not swallow the whole turn: tell the sender why.
+        console.error('[imesg] attachment rejected:', item.mimeType, error instanceof Error ? error.message : String(error))
+        await this.send(channel, `有个附件没存进去（${item.mimeType || '未知类型'}），换个小点的再发一次？`)
       }
     }
     if (content.length === 0) return undefined

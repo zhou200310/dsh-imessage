@@ -125,8 +125,17 @@ cp -a lib/index.js lib/client.js lib/client.js.map lib/typert.host.js lib/typert
      `ImageAttachmentRef`，拼成 `{ type: 'image', attachment }` 的 ContentBlock；
      单张被拒只回一句提示，不吞整个 turn
 
+### 全类型附件（图片 + 文件）
+
+- **栅格图片**（png/jpeg/webp/gif）→ `attachments.saveImage()` → `ImageBlock`，
+  模型直接看到像素
+- **其他任何附件**（视频/pdf/语音/文档…）→ `attachments.saveFile()` → `FileBlock`，
+  DSH 在组装请求时投影成句柄文本（文件名 + 字节数 + 只读路径），模型据此知道收到了什么、
+  并能用工具读取
+- 单张被拒（格式/大小不合规）只回一句提示，不吞掉整个 turn
+
 ### 已知边界
 
-- 只支持 png/jpeg/webp/gif；其他附件（视频、pdf、语音）仍然忽略
-- iMessage 的 attachment 消息不带 caption，所以图片消息没有附带文字
-- 图片走 DSH 附件存储（内容寻址），会落盘在 attachment 目录
+- iMessage 的 attachment 消息不带 caption，所以附件消息没有附带文字
+- 附件走 DSH 附件存储（内容寻址），会落盘在 attachment 目录
+- 语音/视频不会被模型「理解」内容——DSH 的文件块语义是句柄文本，模型知道文件存在与路径
