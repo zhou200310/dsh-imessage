@@ -10,23 +10,40 @@
 
 - 消息从你的 iPhone → Photon → Spectrum → DSH 插件 → 触发 DSH 会话
 - DSH 的回复沿原路发回你的 iMessage
+- **支持多模态**：图片进模型上下文（ImageBlock），视频/pdf/语音等存为文件块（FileBlock）
+- 新建会话自动挂到 cwd 匹配的工作区，不掉进 Ungrouped
 
-## 四个兼容坑（0.1.0-rc.6 → 0.2.2-rc.1）
+## 六个兼容坑（0.1.0-rc.6 → 0.2.2-rc.1）
 
 | # | 断层 | 修复 |
 |---|---|---|
 | 1 | `settingsNamespace()` / `settings.register()` 被删；`SettingsForms` 只投影 **volatile** 字段 | 用户配置字段合并进 cordis `Config` schema 并标 `.volatile()`（schemastery 须 3.19.0） |
 | 2 | `sessionPersistence.inspect()` 被删 | 改用 `open(id, 'read')` + `read()` + `close()` |
 | 3 | 消息 source 的 `'plugin'` kind 被删（只剩 `user`/`model`/`tool`/`system-prompt`） | 改为 `source: { kind: 'user' }`，否则 agent 丢消息、turn 空转 |
-| 4 | 重启后 Spectrum listener 不自动恢复 | 重启后手动 设置 → iMessage → Retry listener（详见 ADAPTATION.md） |
+| 4 | 重启后 Spectrum listener 不自动恢复 | init 改为 `scheduleRuntimeStart()` 延迟重试，等 settings 就绪再 `restart()` |
+| 5 | 消息只认 `content.type === 'text'`，图片/文件被静默丢弃 | 放宽到 `attachment`；图片→`saveImage`/ImageBlock，其他→`saveFile`/FileBlock |
+| 6 | 插件用 `agents.create()` 建的会话绕过工作区挂载，掉进 Ungrouped | 建完 `resolveByPath(cwd)` + `attachSession()` |
 
 完整踩坑记录、重建步骤、依赖版本锁定、排查技巧见 **[ADAPTATION.md](ADAPTATION.md)**。
+
+## 多模态支持
+
+| 附件类型 | 处理方式 |
+|---|---|
+| png / jpeg / webp / gif | `attachments.saveImage()` → **ImageBlock**，模型直接看到像素 |
+| 视频 / pdf / 语音 / 文档 / 其他 | `attachments.saveFile()` → **FileBlock**，请求组装时投影成句柄（文件名+字节数+只读路径） |
+
+单张被拒（格式/大小不合规）只回一句提示，不吞掉整个 turn。
+
+能力边界：语音/视频不会「被理解」内容——FileBlock 在模型侧是句柄文本，模型知道文件存在与路径，图片才是真进上下文。
 
 ## 已验证
 
 - DSH `0.2.2-rc.1`，生产 profile 冷启动激活
 - Photon 设备授权 → 项目 `dsh` → 托管号分配 → Spectrum `Listening`
 - iMessage 端到端收发（`turn/start → step/start → user/message → assistant/message` 完整链路）
+- 图片消息：512×512 JPEG 原图落盘 `~/.dsh/attachments/`，以 ImageBlock 进上下文
+- 新建会话自动归属 cwd 匹配的工作区
 
 ## 快速开始
 
