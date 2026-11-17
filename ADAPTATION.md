@@ -27,12 +27,13 @@
 - 修复：`source: { kind: 'user' }`
 - 修复后诊断铁证：完整跑通 `turn/start → step/start → user/message → assistant/message`
 
-### 坑 4：重启后 listener 不自动恢复（src/index.ts，**待修**）
+### 坑 4：重启后 listener 不自动恢复（src/index.ts，**已修**）
 
 - 现象：每次冷启动后，设置页 `Listener: Stopped`，需手动点 "Retry listener"
 - 根因：`Service.init` 在 dsh 启动早期执行，此时 `settings.describe()` 还读不到 phoneNumber/assignedPhoneNumber（settings 未就绪），于是 `spectrum.restart()` 被跳过
-- 修复方向：init 里延迟触发 spectrum.restart（等 settings 就绪，或用重试定时器）
-- **当前 workaround**：重启后手动去 设置 → iMessage → 点 "Retry listener"
+- 修复：init 里改为 `scheduleRuntimeStart(credential)` —— 延迟重试（500ms × 40 次 ≈ 20 秒），
+  等 `settings.describe()` 能读到 phoneNumber/assignedPhoneNumber 后再 `spectrum.restart()`；
+  teardown 时清理定时器
 
 ## 重建步骤（插件被重装 / 升级 / pnpm install 覆盖后）
 
