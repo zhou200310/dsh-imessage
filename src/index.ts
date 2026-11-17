@@ -119,6 +119,7 @@ export class DshPhotonImessageService extends TypertRemoteService {
   private authGeneration = 0
   private provisionTail = Promise.resolve()
   private inboundTail = Promise.resolve()
+  private runtimeStartTimer: ReturnType<typeof setTimeout> | undefined
 
   /** Construct the host service; async resources open in Service.init. */
   constructor(ctx: Context, config: Config = {}) {
@@ -162,18 +163,17 @@ export class DshPhotonImessageService extends TypertRemoteService {
         phase: 'ready',
         project: { id: credential.project.id, name: credential.project.name },
       }
-      const settings = this.requireSettings().get()
-      if (settings.phoneNumber !== undefined && settings.assignedPhoneNumber !== undefined) {
-        void spectrum.restart({
-          projectId: credential.project.id,
-          projectSecret: credential.project.secret,
-          senderPhoneNumber: settings.phoneNumber,
-          assignedPhoneNumber: settings.assignedPhoneNumber,
-        })
-      }
+      // 坑4：init 时 settings 未就绪（describe 还读不到 phoneNumber），
+      // spectrum.restart 会被跳过导致 listener 停在 Stopped。
+      // 改为延迟重试，等 settings 就绪后再启动 listener。
+      this.scheduleRuntimeStart(credential)
     }
 
     this.ctx.effect(() => async () => {
+      if (this.runtimeStartTimer !== undefined) {
+        clearTimeout(this.runtimeStartTimer)
+        this.runtimeStartTimer = undefined
+      }
       this.authGeneration += 1
       this.authController?.abort(new DOMException('Plugin stopped', 'AbortError'))
       await spectrum.stop()
@@ -181,6 +181,30 @@ export class DshPhotonImessageService extends TypertRemoteService {
       await router.close()
       await domain.close()
     }, 'dsh-imessage.teardown')
+  }
+
+  /** 坑4：延迟启动 Spectrum，等 settings 就绪读到号码再 restart（最多重试约 20 秒）。 */
+  private scheduleRuntimeStart(credential: PhotonCredential): void {
+    const start = (attempt: number): void => {
+      if (this.runtimeStartTimer !== undefined) return
+      const settings = this.requireSettings().get()
+      if (settings.phoneNumber !== undefined && settings.assignedPhoneNumber !== undefined) {
+        void this.spectrum?.restart({
+          projectId: credential.project.id,
+          projectSecret: credential.project.secret,
+          senderPhoneNumber: settings.phoneNumber,
+          assignedPhoneNumber: settings.assignedPhoneNumber,
+        })
+        return
+      }
+      if (attempt < 40) {
+        this.runtimeStartTimer = setTimeout(() => {
+          this.runtimeStartTimer = undefined
+          start(attempt + 1)
+        }, 500)
+      }
+    }
+    start(0)
   }
 
   /** Read the complete redacted settings-page state. */
