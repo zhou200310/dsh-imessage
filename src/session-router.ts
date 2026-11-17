@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage, MessageId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { chunkText } from './chunks.js'
 import { parseCommand, type ParsedCommand } from './commands.js'
 import { markdownToPlainText } from './plaintext.js'
@@ -468,7 +469,21 @@ export class SessionRouter {
       agent: handle.agent,
       dispose: once(() => disposeBinding?.()),
     })
+    await this.attachToWorkspace(handle.agent.id)
     return handle
+  }
+
+  /** Attach a plugin-created session to the Workspace whose path matches this cwd.
+   * Without this the session trails in the sidebar's Ungrouped bucket, because a
+   * Workspace only lists sessions it explicitly owns. */
+  private async attachToWorkspace(sessionId: SessionId): Promise<void> {
+    try {
+      const workspace = await this.ctx.workspaceRegistry.resolveByPath(this.options.cwd)
+      if (workspace === undefined) return
+      await workspace.attachSession(sessionId)
+    } catch (error) {
+      console.error('[imesg] workspace attach failed:', error instanceof Error ? error.message : String(error))
+    }
   }
 
   private async resumeAgent(

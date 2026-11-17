@@ -139,3 +139,25 @@ cp -a lib/index.js lib/client.js lib/client.js.map lib/typert.host.js lib/typert
 - iMessage 的 attachment 消息不带 caption，所以附件消息没有附带文字
 - 附件走 DSH 附件存储（内容寻址），会落盘在 attachment 目录
 - 语音/视频不会被模型「理解」内容——DSH 的文件块语义是句柄文本，模型知道文件存在与路径
+
+
+---
+
+## 附加修复：iMessage 新建会话掉进 Ungrouped（2026-11-18）
+
+### 现象
+在 iMessage 里 `/new` 或直接发消息开新会话，侧栏里它出现在 **Ungrouped**，不在
+`cwd` 对应的那个工作区下面。
+
+### 根因
+DSH 的工作区只列出 `workspace.sessionIds` 里**显式登记**的会话。UI 里新建会话会走
+workspace controller 自动 attach，但插件用 `ctx.agents.create()` 直接建会话，绕过了这一步。
+
+### 修复（src/session-router.ts + src/index.ts）
+- `inject` 增加 `'workspaceRegistry'`
+- `createAgent()` 末尾调用新的 `attachToWorkspace(agent.id)`：
+  ```ts
+  const workspace = await this.ctx.workspaceRegistry.resolveByPath(this.options.cwd)
+  if (workspace !== undefined) await workspace.attachSession(sessionId)
+  ```
+- 失败只记日志，不影响会话本身可用

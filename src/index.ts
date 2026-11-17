@@ -81,6 +81,7 @@ export const name = 'dsh-imessage'
 export const inject = [
   'settings',
   'attachments',
+  'workspaceRegistry',
   'credentials',
   'storageDomain',
   'agents',
