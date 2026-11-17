@@ -80,6 +80,7 @@ export const name = 'dsh-imessage'
 /** Required DSH host services. */
 export const inject = [
   'settings',
+  'attachments',
   'credentials',
   'storageDomain',
   'agents',

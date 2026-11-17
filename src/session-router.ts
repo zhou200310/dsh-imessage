@@ -9,7 +9,7 @@ import {
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, MessageId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { chunkText } from './chunks.js'
@@ -95,7 +95,8 @@ export class SessionRouter {
     console.log("[imesg-diag] receive message:", JSON.stringify(message.text).slice(0, 80))
     if (this.closed) return
     const text = message.text.trim()
-    if (text.length === 0) return
+    const hasImages = (message.images?.length ?? 0) > 0
+    if (text.length === 0 && !hasImages) return
 
     if (!text.startsWith('/')) {
       const answered = this.interactions.answerBare(text)
@@ -189,10 +190,26 @@ export class SessionRouter {
     channel: SpectrumInboundMessage,
     prompt: string,
   ): Promise<string | undefined> {
+    // dsh 0.2.x removed the catch-all 'plugin' source kind; a plain user source
+    // is what the agent loop claims into the turn (unknown kinds are dropped).
+    const content: ContentBlock[] = prompt.length === 0 ? [] : [{ type: 'text', text: prompt }]
+    for (const image of channel.images ?? []) {
+      try {
+        const attachment = await this.ctx.attachments.saveImage({
+          data: image.data,
+          mediaType: image.mediaType,
+          ...(image.name === undefined ? {} : { name: image.name }),
+        })
+        content.push({ type: 'image', attachment })
+      } catch (error) {
+        // A refused image must not swallow the whole turn: tell the sender why.
+        console.error('[imesg] image rejected:', error instanceof Error ? error.message : String(error))
+        await this.send(channel, '这张图片没存进去（格式或大小不被接受），换成 jpg/png 再发一次？')
+      }
+    }
+    if (content.length === 0) return undefined
     const userMessage = createUserMessage({
-      content: [{ type: 'text', text: prompt }],
-      // dsh 0.2.x removed the catch-all 'plugin' source kind; a plain user source
-      // is what the agent loop claims into the turn (unknown kinds are dropped).
+      content,
       source: { kind: 'user' },
     })
     console.log("[imesg-diag] userMessage id:", userMessage.id)

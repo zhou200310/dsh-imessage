@@ -19,11 +19,23 @@ export interface SpectrumConnectionConfig {
 }
 
 /** Text-only inbound message accepted by the security filter. */
+/** One inbound image decoded from a provider attachment. */
+export interface InboundImage {
+  /** Raw encoded bytes as received. */
+  data: Uint8Array
+  /** Declared raster media type; only the DSH attachment store's accepted types pass. */
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  /** Provider display name, never interpreted as a path. */
+  name?: string
+}
+
 export interface SpectrumInboundMessage {
   /** Durable provider message id. */
   id: string
-  /** Plain inbound text. */
+  /** Plain inbound text (empty for an attachment-only message). */
   text: string
+  /** Inbound images carried by this message, in provider order. */
+  images?: readonly InboundImage[]
   /** Run work while Spectrum maintains typing state. */
   responding<T>(callback: () => Promise<T>): Promise<T>
   /** Send one plain-text iMessage to the same DM. */
@@ -288,14 +300,17 @@ export function acceptsInboundMessage(
   id: string
   platform: 'imessage'
   direction: 'inbound'
-  content: { type: 'text'; text: string }
+  content: { type: 'text'; text: string } | { type: 'attachment'; mimeType: string; name: string; read: () => Promise<Buffer> }
   sender: { id?: string; address?: string; service?: string }
   space: { type: 'dm'; phone: string }
 } {
   if (raw.platform !== 'imessage' || raw.direction !== 'inbound' || typeof raw.id !== 'string') return false
   if (!raw.content || typeof raw.content !== 'object') return false
   const content = raw.content as Record<string, unknown>
-  if (content['type'] !== 'text' || typeof content['text'] !== 'string') return false
+  const contentType = content['type']
+  const isText = contentType === 'text' && typeof content['text'] === 'string'
+  const isAttachment = contentType === 'attachment' && typeof content['mimeType'] === 'string'
+  if (!isText && !isAttachment) return false
   if (!raw.sender || typeof raw.sender !== 'object') return false
   const sender = raw.sender as Record<string, unknown>
   const address = typeof sender['address'] === 'string'
@@ -325,15 +340,38 @@ function adaptSpectrum(
   }
 }
 
+/** Raster types the DSH attachment store accepts; other attachments stay unsupported. */
+const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
 async function* mapMessages(
   app: SpectrumInstance,
   config: SpectrumConnectionConfig,
 ): AsyncIterable<SpectrumInboundMessage> {
   for await (const [space, message] of app.messages) {
     if (!acceptsInboundMessage(message, config)) continue
+    const content = message.content
+    let text = ''
+    let images: InboundImage[] | undefined
+    if (content.type === 'text') {
+      text = content.text
+    } else {
+      // Attachment-only message: decode the raster so the router can store it as an ImageBlock.
+      if (!SUPPORTED_IMAGE_TYPES.has(content.mimeType)) continue
+      try {
+        const buffer = await content.read()
+        images = [{
+          data: new Uint8Array(buffer),
+          mediaType: content.mimeType as InboundImage['mediaType'],
+          ...(content.name.length === 0 ? {} : { name: content.name }),
+        }]
+      } catch {
+        continue
+      }
+    }
     yield {
       id: message.id,
-      text: message.content.text,
+      text,
+      ...(images === undefined ? {} : { images }),
       responding: callback => space.responding(callback),
       send: async (value) => {
         await space.send(value)

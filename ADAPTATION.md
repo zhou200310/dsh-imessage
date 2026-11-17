@@ -102,3 +102,31 @@ cp -a lib/index.js lib/client.js lib/client.js.map lib/typert.host.js lib/typert
 - 消息链路：`receive → processPrompt → ensureActiveAgent → followup → agent turn → assistant → send`
 - 判断消息进没进插件：看 `inbox inserted` 有没有日志
 - 判断 turn 有没有跑：看 `step/start` / `user/message` / `assistant/message`
+
+---
+
+## 附加功能：iMessage 图片消息（2026-11-18 凌晨）
+
+上游只接受 `content.type === 'text'`，图片消息（`type: 'attachment'`）被静默丢弃。
+本适配补上了图片支持，走 DSH 原生附件服务（ImageBlock），不是存文件给路径。
+
+### 改动
+
+1. **src/index.ts** — `inject` 增加 `'attachments'`（AttachmentStore 服务）
+2. **src/spectrum-runtime.ts**
+   - 新增 `InboundImage { data, mediaType, name? }`
+   - `SpectrumInboundMessage` 增加可选 `images`
+   - `acceptsInboundMessage` 放宽：`text` **或** `attachment`（且 mimeType 是 string）都接受
+   - `mapMessages` 对 attachment 调 `content.read()` 解出 Buffer，只放行
+     `image/png|jpeg|webp|gif`（DSH attachment store 的 `ImageMediaType` 白名单）
+3. **src/session-router.ts**
+   - `receive()`：纯图片消息（text 为空但有 images）不再被提前 return
+   - `runTurn()`：逐张 `ctx.attachments.saveImage({ data, mediaType, name })` 拿
+     `ImageAttachmentRef`，拼成 `{ type: 'image', attachment }` 的 ContentBlock；
+     单张被拒只回一句提示，不吞整个 turn
+
+### 已知边界
+
+- 只支持 png/jpeg/webp/gif；其他附件（视频、pdf、语音）仍然忽略
+- iMessage 的 attachment 消息不带 caption，所以图片消息没有附带文字
+- 图片走 DSH 附件存储（内容寻址），会落盘在 attachment 目录
