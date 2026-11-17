@@ -1,0 +1,12 @@
+adapt: port dsh-imessage to DSH 0.2.2
+
+四个兼容坑修复（0.1.0-rc.6 → 0.2.2-rc.1）：
+1. settings: settingsNamespace()/settings.register() 被删，SettingsForms 只投影
+   volatile 字段 → 用户配置合并进 Config schema 标 .volatile()
+2. sessionPersistence.inspect() 被删 → 改用 open(id,'read')+read()+close()
+3. 消息 source 的 'plugin' kind 被删 → 改 source:{kind:'user'}（agent 丢消息的真凶）
+4. 重启后 Spectrum listener 不自动恢复（init 时序，见 ADAPTATION.md）
+
+依赖: schemastery 3.19.0、dsh-typert-generator/protocol 0.2.2-rc.1
+
+详见 ADAPTATION.md。

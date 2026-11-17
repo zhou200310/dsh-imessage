@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Verify and pack, publish staging, or promote a stored candidate
+        type: choice
+        options: [dry-run, stage, promote]
+        default: dry-run
+      staging-version:
+        description: Staging version to promote; blank selects the current staging tag
+        type: string
+        default: ""
+
+jobs:
+  stage:
+    if: github.event_name == 'push' || inputs.operation == 'dry-run' || inputs.operation == 'stage'
+    uses: photon-hq/buildspace/.github/workflows/package-stage.yml@913e9cef8e8bd00775b28ac3e2a759ccfc796eea
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write
+      packages: write
+      actions: read
+      attestations: write
+    with:
+      package: dsh-imessage
+      registry: https://registry.npmjs.org
+      environment: staging
+      setup-pnpm: false
+      install: npm ci --legacy-peer-deps --ignore-scripts
+      ci-workflow: ci.yml
+      verify: npm run check
+      pack: node scripts/pack-release.mjs
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'dry-run' }}
+
+  promote:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'promote' && github.ref == 'refs/heads/main'
+    uses: photon-hq/buildspace/.github/workflows/package-promote.yml@913e9cef8e8bd00775b28ac3e2a759ccfc796eea
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+      attestations: read
+      id-token: write
+    with:
+      package: dsh-imessage
+      registry: https://registry.npmjs.org
+      environment: production
+      staging-version: ${{ inputs.staging-version }}
