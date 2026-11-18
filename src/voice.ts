@@ -15,6 +15,8 @@
  * @module dsh-imessage/voice
  */
 import { spawn } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -50,11 +52,51 @@ function remoteUrl(): string {
   return 'http://192.168.10.111:8090'
 }
 
+/**
+ * POST/GET straight to the voice host over node:http.
+ *
+ * fetch() inherits whatever dispatcher the host process installed, and dsh
+ * runs behind an HTTPS proxy — a LAN address must never be sent through it.
+ * @param url - absolute http(s) URL.
+ * @param body - request body, or undefined for GET.
+ * @param timeoutMs - hard ceiling for the whole exchange.
+ * @returns status code and raw response bytes.
+ */
+function hostRequest(
+  url: string,
+  body: Buffer | undefined,
+  timeoutMs: number,
+): Promise<{ status: number; data: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    const send = target.protocol === 'https:' ? httpsRequest : httpRequest
+    const req = send({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: body === undefined ? 'GET' : 'POST',
+      headers: body === undefined
+        ? {}
+        : { 'content-type': 'application/octet-stream', 'content-length': String(body.length) },
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, data: Buffer.concat(chunks) }))
+      res.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(new Error(`timed out after ${timeoutMs}ms`)))
+    req.on('error', reject)
+    if (body !== undefined) req.write(body)
+    req.end()
+  })
+}
+
 /** Whether the compute host is reachable right now. */
 export async function hostAlive(): Promise<boolean> {
   try {
-    const response = await fetch(`${remoteUrl()}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
-    return response.ok
+    const { status } = await hostRequest(`${remoteUrl()}/health`, undefined, HEALTH_TIMEOUT_MS)
+    return status === 200
   } catch {
     return false
   }
@@ -126,17 +168,19 @@ export async function synthesize(segment: VoiceSegment): Promise<string> {
     if (segment.rate !== undefined) params.set('rate', segment.rate)
     if (segment.pitch !== undefined) params.set('pitch', segment.pitch)
   }
-  const response = await fetch(`${base}/tts?${params.toString()}`, {
-    method: 'POST',
-    body: segment.text,
-    signal: AbortSignal.timeout(60_000),
-  })
-  if (!response.ok) {
-    throw new Error(`voice host /tts ${response.status}: ${(await response.text()).slice(0, 200)}`)
+  console.log('[imesg] voice: requesting', segment.instructions === undefined ? 'edge' : 'breeze',
+    `${segment.text.length} chars`)
+  const response = await hostRequest(
+    `${base}/tts?${params.toString()}`,
+    Buffer.from(segment.text, 'utf8'),
+    60_000,
+  )
+  if (response.status !== 200) {
+    throw new Error(`voice host /tts ${response.status}: ${response.data.toString('utf8').slice(0, 200)}`)
   }
   const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-'))
   const mp3 = join(dir, 'reply.mp3')
-  writeFileSync(mp3, Buffer.from(await response.arrayBuffer()))
+  writeFileSync(mp3, response.data)
   // iMessage voice notes are AAC in an MP4 container; a bare MP3 arrives as a
   // one-second stub the phone cannot play.
   const m4a = join(dir, 'reply.m4a')
@@ -168,15 +212,11 @@ export async function transcribe(path: string, language?: string): Promise<strin
   const { wav, cleanup } = await toWav(path)
   try {
     const query = language !== undefined && language.length > 0 ? `?lang=${encodeURIComponent(language)}` : ''
-    const response = await fetch(`${remoteUrl()}/stt${query}`, {
-      method: 'POST',
-      body: readFileSync(wav),
-      signal: AbortSignal.timeout(180_000),
-    })
-    if (!response.ok) {
-      throw new Error(`voice host /stt ${response.status}: ${(await response.text()).slice(0, 200)}`)
+    const response = await hostRequest(`${remoteUrl()}/stt${query}`, readFileSync(wav), 180_000)
+    if (response.status !== 200) {
+      throw new Error(`voice host /stt ${response.status}: ${response.data.toString('utf8').slice(0, 200)}`)
     }
-    return (await response.text()).trim()
+    return response.data.toString('utf8').trim()
   } finally {
     cleanup()
   }
