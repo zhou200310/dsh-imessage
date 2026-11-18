@@ -24,7 +24,7 @@ import { PLUGIN_ID } from './constants.js'
 import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
 import { resolveMeme, splitMemeMarkers } from './memes.js'
-import { canSynthesize, canTranscribe, splitVoiceMarkers, synthesize, transcribe } from './voice.js'
+import { hostAlive, splitVoiceMarkers, synthesize, transcribe } from './voice.js'
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
 import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
@@ -602,8 +602,8 @@ export class SessionRouter {
   /** Speak the `[语音: …]` segments and deliver them as audio attachments. */
   private async sendVoice(channel: SpectrumInboundMessage, segments: readonly string[]): Promise<void> {
     if (segments.length === 0) return
-    if (!canSynthesize()) {
-      console.error('[imesg] voice synthesis unavailable: no Python virtualenv at', process.env['DSH_VOICE_PYTHON'] ?? '(default)')
+    if (!await hostAlive()) {
+      console.error('[imesg] voice host unreachable; skipping', segments.length, 'spoken segment(s)')
       return
     }
     for (const segment of segments) {
@@ -623,8 +623,8 @@ export class SessionRouter {
 
   /** Decode one inbound voice note to text through the local recognizer. */
   private async transcribeAttachment(item: InboundAttachment): Promise<string> {
-    if (!canTranscribe()) {
-      console.error('[imesg] transcription unavailable: no faster-whisper virtualenv')
+    if (!await hostAlive()) {
+      console.error('[imesg] voice host unreachable; cannot transcribe this note')
       return ''
     }
     const dir = mkdtempSync(join(tmpdir(), 'dsh-imesg-voice-'))

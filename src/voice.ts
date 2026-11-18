@@ -1,21 +1,22 @@
 /**
- * Voice support for iMessage delivery.
+ * Voice support for iMessage delivery, backed by the LAN compute host.
  *
- * Outbound: the agent writes `[语音: 文本]`; the plugin synthesizes speech with
- * edge-tts and sends the audio file, because iMessage renders a real voice note
- * far better than a wall of text.
+ * Outbound: the agent writes `[语音: 文本]`; the plugin asks the compute host to
+ * synthesize speech and sends the audio file, because iMessage renders a real
+ * voice note far better than a wall of text.
  *
- * Inbound: an audio attachment is transcribed with faster-whisper so the model
- * receives words instead of an opaque FileBlock handle.
+ * Inbound: an audio attachment is re-encoded locally and transcribed on the
+ * compute host, so the model receives words instead of an opaque FileBlock.
  *
- * Both directions shell out to a Python virtualenv that carries edge-tts and
- * faster-whisper; the Node side stays dependency-free.
+ * All speech work runs on the compute host — nothing is synthesized or
+ * recognized on this machine. Audio is re-encoded to 16 kHz mono WAV here
+ * because the host has no ffmpeg.
  *
  * @module dsh-imessage/voice
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 /** Marker the agent writes to ask for spoken output. */
@@ -24,61 +25,30 @@ const VOICE_MARKER = /\[语音:\s*([^\]\n]+?)\s*\]/gu
 /** Voice used for synthesized replies (Mandarin, young female). */
 const DEFAULT_VOICE = 'zh-CN-XiaoyiNeural'
 
-/** Remote compute host that runs the voice service, when one is configured. */
-function remoteUrl(): string | undefined {
+/** How long to wait for the host's health probe before giving up. */
+const HEALTH_TIMEOUT_MS = 4000
+
+/** Base URL of the voice service, without a trailing slash. */
+function remoteUrl(): string {
   const configured = process.env['DSH_VOICE_URL']
   if (configured !== undefined && configured.length > 0) return configured.replace(/\/+$/u, '')
   return 'http://192.168.10.111:8090'
 }
 
-/** Whether a remote voice host is reachable right now. */
-async function remoteAlive(): Promise<boolean> {
-  const base = remoteUrl()
-  if (base === undefined) return false
+/** Whether the compute host is reachable right now. */
+export async function hostAlive(): Promise<boolean> {
   try {
-    const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(4000) })
+    const response = await fetch(`${remoteUrl()}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
     return response.ok
   } catch {
     return false
   }
 }
 
-/** Re-encode any inbound audio to the 16 kHz mono WAV the recognizers want. */
-async function toWav(path: string): Promise<string> {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-wav-'))
-  const out = join(dir, 'audio.wav')
-  await run('ffmpeg', ['-y', '-v', 'error', '-i', path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', out])
-  return out
-}
-
-/** Directory holding the shared Python virtualenv and helper scripts. */
-function toolsDir(): string {
-  const configured = process.env['DSH_VOICE_TOOLS']
-  if (configured !== undefined && configured.length > 0) return configured
-  return join(process.env['DSH_HOME'] ?? join(homedir(), '.dsh'), '..', 'tools')
-}
-
-/** Interpreter that has edge-tts and faster-whisper installed. */
-function pythonPath(): string {
-  const configured = process.env['DSH_VOICE_PYTHON']
-  if (configured !== undefined && configured.length > 0) return configured
-  return join(toolsDir(), 'tts-venv', 'bin', 'python')
-}
-
-/** Whether this deployment can synthesize speech at all. */
-export function canSynthesize(): boolean {
-  return existsSync(pythonPath())
-}
-
-/** Whether this deployment can transcribe audio at all. */
-export function canTranscribe(): boolean {
-  return existsSync(pythonPath()) && existsSync(join(toolsDir(), 'voice-stt.py'))
-}
-
 /** Run one child process and collect stdout, failing on a non-zero exit. */
-function run(command: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<string> {
+function run(command: string, args: readonly string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk })
@@ -106,75 +76,57 @@ export function splitVoiceMarkers(text: string): { text: string; segments: strin
 }
 
 /**
- * Synthesize one line of speech into a temporary MP3.
+ * Synthesize one line of speech into a temporary MP3 on the compute host.
  * @param text - what to say.
  * @returns absolute path of the audio file; the caller owns cleanup.
+ * @throws when the host is unreachable or refuses the request.
  */
 export async function synthesize(text: string): Promise<string> {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-'))
-  const out = join(dir, 'reply.mp3')
   const base = remoteUrl()
   const voiceName = process.env['DSH_VOICE_NAME'] ?? DEFAULT_VOICE
-  if (base !== undefined && await remoteAlive()) {
-    try {
-      const response = await fetch(`${base}/tts?voice=${encodeURIComponent(voiceName)}`, {
-        method: 'POST',
-        body: text,
-        signal: AbortSignal.timeout(60_000),
-      })
-      if (response.ok) {
-        writeFileSync(out, Buffer.from(await response.arrayBuffer()))
-        return out
-      }
-      console.error('[imesg] remote tts refused:', response.status)
-    } catch (error) {
-      console.error('[imesg] remote tts failed, falling back to local:',
-        error instanceof Error ? error.message : String(error))
-    }
+  const response = await fetch(`${base}/tts?voice=${encodeURIComponent(voiceName)}`, {
+    method: 'POST',
+    body: text,
+    signal: AbortSignal.timeout(60_000),
+  })
+  if (!response.ok) {
+    throw new Error(`voice host /tts ${response.status}: ${(await response.text()).slice(0, 200)}`)
   }
-  try {
-    await run(pythonPath(), [
-      '-m', 'edge_tts',
-      '--voice', voiceName,
-      '--text', text,
-      '--write-media', out,
-    ])
-  } catch (error) {
-    rmSync(dir, { recursive: true, force: true })
-    throw error
-  }
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-'))
+  const out = join(dir, 'reply.mp3')
+  writeFileSync(out, Buffer.from(await response.arrayBuffer()))
   return out
 }
 
+/** Re-encode any inbound audio to the 16 kHz mono WAV the recognizer wants. */
+async function toWav(path: string): Promise<{ wav: string; cleanup: () => void }> {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-wav-'))
+  const out = join(dir, 'audio.wav')
+  await run('ffmpeg', ['-y', '-v', 'error', '-i', path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', out])
+  return { wav: out, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
 /**
- * Transcribe one audio file to text.
+ * Transcribe one audio file to text on the compute host.
  * @param path - absolute path of the audio the sender attached.
  * @param language - optional language hint; omit to let the model detect it.
  * @returns the transcript, or an empty string when nothing was recognized.
+ * @throws when the host is unreachable or refuses the request.
  */
 export async function transcribe(path: string, language?: string): Promise<string> {
-  const base = remoteUrl()
-  if (base !== undefined && await remoteAlive()) {
-    let wav: string | undefined
-    try {
-      wav = await toWav(path)
-      const query = language !== undefined && language.length > 0 ? `?lang=${encodeURIComponent(language)}` : ''
-      const response = await fetch(`${base}/stt${query}`, {
-        method: 'POST',
-        body: readFileSync(wav),
-        signal: AbortSignal.timeout(180_000),
-      })
-      if (response.ok) return (await response.text()).trim()
-      console.error('[imesg] remote stt refused:', response.status, (await response.text()).slice(0, 200))
-    } catch (error) {
-      console.error('[imesg] remote stt failed, falling back to local:',
-        error instanceof Error ? error.message : String(error))
-    } finally {
-      if (wav !== undefined) rmSync(join(wav, '..'), { recursive: true, force: true })
+  const { wav, cleanup } = await toWav(path)
+  try {
+    const query = language !== undefined && language.length > 0 ? `?lang=${encodeURIComponent(language)}` : ''
+    const response = await fetch(`${remoteUrl()}/stt${query}`, {
+      method: 'POST',
+      body: readFileSync(wav),
+      signal: AbortSignal.timeout(180_000),
+    })
+    if (!response.ok) {
+      throw new Error(`voice host /stt ${response.status}: ${(await response.text()).slice(0, 200)}`)
     }
+    return (await response.text()).trim()
+  } finally {
+    cleanup()
   }
-  const args = [join(toolsDir(), 'voice-stt.py'), path]
-  if (language !== undefined && language.length > 0) args.push(language)
-  const stdout = await run(pythonPath(), args)
-  return stdout.trim()
 }

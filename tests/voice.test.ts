@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { rmSync } from 'node:fs'
-import { canSynthesize, canTranscribe, splitVoiceMarkers, synthesize, transcribe } from '../src/voice.js'
+import { hostAlive, splitVoiceMarkers, synthesize, transcribe } from '../src/voice.js'
 
 describe('voice markers in outbound text', () => {
   it('pulls a spoken segment out and keeps the rest', () => {
@@ -22,8 +22,8 @@ describe('voice markers in outbound text', () => {
     expect(text).toBe('纯文字')
   })
 
-  it('round-trips speech through synthesis and recognition', async () => {
-    if (!canSynthesize() || !canTranscribe()) return
+  it('round-trips speech through the compute host', async () => {
+    if (!await hostAlive()) return
     const file = await synthesize('我是大肥鱼，不是吃白饭的')
     try {
       const heard = await transcribe(file, 'zh')
@@ -35,9 +35,14 @@ describe('voice markers in outbound text', () => {
     }
   }, 180_000)
 
-  it('reports whether this deployment has the speech toolchain', () => {
-    // Both answers depend on the host, so assert the contract, not a value.
-    expect(typeof canSynthesize()).toBe('boolean')
-    expect(typeof canTranscribe()).toBe('boolean')
-  })
+  it('probes the compute host without throwing when it is down', async () => {
+    const saved = process.env['DSH_VOICE_URL']
+    process.env['DSH_VOICE_URL'] = 'http://127.0.0.1:9'
+    try {
+      await expect(hostAlive()).resolves.toBe(false)
+    } finally {
+      if (saved === undefined) delete process.env['DSH_VOICE_URL']
+      else process.env['DSH_VOICE_URL'] = saved
+    }
+  }, 20_000)
 })
