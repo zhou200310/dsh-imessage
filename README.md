@@ -10,7 +10,7 @@
 
 - 消息从你的 iPhone → Photon → Spectrum → DSH 插件 → 触发 DSH 会话
 - DSH 的回复沿原路发回你的 iMessage
-- **支持多模态**：图片进模型上下文（ImageBlock），视频/pdf/语音等存为文件块（FileBlock）
+- **支持多模态**：图片进模型上下文（ImageBlock），语音转写成文字，其他文件存为文件块（FileBlock）
 - 新建会话自动挂到 cwd 匹配的工作区，不掉进 Ungrouped
 
 ## 六个兼容坑（0.1.0-rc.6 → 0.2.2-rc.1）
@@ -33,7 +33,8 @@
 | 附件类型 | 处理方式 |
 |---|---|
 | png / jpeg / webp / gif | `attachments.saveImage()` → **ImageBlock**，模型直接看到像素 |
-| 视频 / pdf / 语音 / 文档 / 其他 | `attachments.saveFile()` → **FileBlock**，请求组装时投影成句柄（文件名+字节数+只读路径） |
+| 语音（`audio/*`） | `faster-whisper` 转写成文字，直接进上下文 |
+| 视频 / pdf / 文档 / 其他 | `attachments.saveFile()` → **FileBlock**，请求组装时投影成句柄（文件名+字节数+只读路径） |
 
 单张被拒（格式/大小不合规）只回一句提示，不吞掉整个 turn。
 
@@ -48,7 +49,18 @@ Agent 回答里带的图片和文件，按原生 iMessage 附件发出去：
 
 文本仍然先发（切块），附件按 turn 内产生顺序跟在后面；单个附件发失败只记日志，不影响其余部分。
 
-能力边界：语音/视频不会「被理解」内容——FileBlock 在模型侧是句柄文本，模型知道文件存在与路径，图片才是真进上下文。
+**语音**
+
+| 方向 | 触发 | 处理 |
+|---|---|---|
+| 收 | iPhone 发来语音（`audio/*`） | 落临时文件 → `faster-whisper` tiny 模型转写 → 以文字进上下文 |
+| 发 | 回答里写 `[语音: 文本]` | `edge-tts`（`zh-CN-XiaoyiNeural`）合成 mp3 → 作为音频附件发出 |
+
+语音工具链在共享 venv 里（`tools/tts-venv`），Node 侧零依赖、只 shell 出去调用。可用环境变量覆盖：`DSH_VOICE_TOOLS`（脚本目录）、`DSH_VOICE_PYTHON`（解释器）、`DSH_VOICE_NAME`（发音人）。
+
+出站合成要连微软服务器，需要代理可达；入站识别纯本地。识别一次约 5 秒（模型加载占大头），这条语音会等它转写完再进 turn。
+
+能力边界：语音/视频不会「被理解」内容——FileBlock 在模型侧是句柄文本，模型知道文件存在与路径，图片才是真进上下文。语音是个例外：它会被转写成文字，所以内容是"被听懂"的，但语气和情绪听不出来。
 
 ## 已验证
 

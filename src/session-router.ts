@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   installModelSelection,
@@ -16,11 +19,12 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import { chunkText } from './chunks.js'
 import { parseCommand, type ParsedCommand } from './commands.js'
 import { markdownToPlainText } from './plaintext.js'
-import { IMAGE_MEDIA_TYPES } from './spectrum-runtime.js'
+import { IMAGE_MEDIA_TYPES, type InboundAttachment } from './spectrum-runtime.js'
 import { PLUGIN_ID } from './constants.js'
 import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
 import { resolveMeme, splitMemeMarkers } from './memes.js'
+import { canSynthesize, canTranscribe, splitVoiceMarkers, synthesize, transcribe } from './voice.js'
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
 import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
@@ -211,8 +215,17 @@ export class SessionRouter {
             ...(item.name === undefined ? {} : { name: item.name }),
           })
           content.push({ type: 'image', attachment })
+        } else if (item.mimeType.startsWith('audio/')) {
+          // A voice note is only useful as words: transcribe it so the model
+          // receives text instead of an opaque file handle.
+          const transcript = await this.transcribeAttachment(item)
+          if (transcript.length > 0) {
+            content.push({ type: 'text', text: `（对方发来一条语音，转写如下）${transcript}` })
+          } else {
+            await this.send(channel, '这条语音没听清，再说一遍？')
+          }
         } else {
-          // Anything else (video/pdf/audio/…): verbatim file, projected to handle text
+          // Anything else (video/pdf/…): verbatim file, projected to handle text
           // (name + byte size + read-only path) at request assembly.
           const attachment = await this.ctx.attachments.saveFile({
             data: item.data,
@@ -577,11 +590,55 @@ export class SessionRouter {
   private async send(channel: SpectrumInboundMessage, text: string): Promise<void> {
     // The Web client renders `[表情: …]` itself; over iMessage the marker has to
     // become the real image, so pull it out before the text goes out.
-    const { text: plain, captions } = splitMemeMarkers(text)
-    if (plain.trim().length > 0) {
-      for (const chunk of chunkText(plain, this.options.maxOutboundChars)) await channel.send(chunk)
+    const memed = splitMemeMarkers(text)
+    const voiced = splitVoiceMarkers(memed.text)
+    if (voiced.text.trim().length > 0) {
+      for (const chunk of chunkText(voiced.text, this.options.maxOutboundChars)) await channel.send(chunk)
     }
-    await this.sendMemes(channel, captions)
+    await this.sendMemes(channel, memed.captions)
+    await this.sendVoice(channel, voiced.segments)
+  }
+
+  /** Speak the `[语音: …]` segments and deliver them as audio attachments. */
+  private async sendVoice(channel: SpectrumInboundMessage, segments: readonly string[]): Promise<void> {
+    if (segments.length === 0) return
+    if (!canSynthesize()) {
+      console.error('[imesg] voice synthesis unavailable: no Python virtualenv at', process.env['DSH_VOICE_PYTHON'] ?? '(default)')
+      return
+    }
+    for (const segment of segments) {
+      let file: string | undefined
+      try {
+        file = await synthesize(segment)
+        await channel.send(attachment(file))
+      } catch (error) {
+        console.error('[imesg] voice synthesis failed:',
+          error instanceof Error ? error.message : String(error))
+      } finally {
+        if (file !== undefined) rmSync(file, { recursive: true, force: true })
+      }
+    }
+  }
+
+  /** Decode one inbound voice note to text through the local recognizer. */
+  private async transcribeAttachment(item: InboundAttachment): Promise<string> {
+    if (!canTranscribe()) {
+      console.error('[imesg] transcription unavailable: no faster-whisper virtualenv')
+      return ''
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-imesg-voice-'))
+    const suffix = item.mimeType.includes('mpeg') ? 'mp3' : item.mimeType.includes('wav') ? 'wav' : 'm4a'
+    const file = join(dir, `voice.${suffix}`)
+    try {
+      writeFileSync(file, item.data)
+      return await transcribe(file, 'zh')
+    } catch (error) {
+      console.error('[imesg] transcription failed:',
+        error instanceof Error ? error.message : String(error))
+      return ''
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   }
 
   /** Deliver the images behind the meme markers this answer carried. */
