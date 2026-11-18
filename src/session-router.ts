@@ -20,6 +20,7 @@ import { IMAGE_MEDIA_TYPES } from './spectrum-runtime.js'
 import { PLUGIN_ID } from './constants.js'
 import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
+import { resolveMeme, splitMemeMarkers } from './memes.js'
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
 import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
@@ -574,7 +575,30 @@ export class SessionRouter {
   }
 
   private async send(channel: SpectrumInboundMessage, text: string): Promise<void> {
-    for (const chunk of chunkText(text, this.options.maxOutboundChars)) await channel.send(chunk)
+    // The Web client renders `[表情: …]` itself; over iMessage the marker has to
+    // become the real image, so pull it out before the text goes out.
+    const { text: plain, captions } = splitMemeMarkers(text)
+    if (plain.trim().length > 0) {
+      for (const chunk of chunkText(plain, this.options.maxOutboundChars)) await channel.send(chunk)
+    }
+    await this.sendMemes(channel, captions)
+  }
+
+  /** Deliver the images behind the meme markers this answer carried. */
+  private async sendMemes(channel: SpectrumInboundMessage, captions: readonly string[]): Promise<void> {
+    for (const caption of captions) {
+      const meme = resolveMeme(caption)
+      if (meme === undefined) {
+        console.error('[imesg] meme not found in any enabled pack:', caption)
+        continue
+      }
+      try {
+        await channel.send(attachment(meme.file))
+      } catch (error) {
+        console.error('[imesg] meme send failed:', caption,
+          error instanceof Error ? error.message : String(error))
+      }
+    }
   }
 
   /** Deliver attachments the agent produced, in the order the turn emitted them. */
