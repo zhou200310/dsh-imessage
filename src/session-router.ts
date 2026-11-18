@@ -28,7 +28,7 @@ import { canSynthesize, canTranscribe, splitVoiceMarkers, synthesize, transcribe
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
 import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
-import { attachment, type ContentBuilder } from '@spectrum-ts/core'
+import { attachment, voice, type ContentBuilder } from '@spectrum-ts/core'
 
 interface AgentBinding {
   agent: Agent
@@ -610,7 +610,8 @@ export class SessionRouter {
       let file: string | undefined
       try {
         file = await synthesize(segment)
-        await channel.send(attachment(file))
+        // Send as a voice note so iMessage renders a playable bubble, not a file.
+        await channel.send(voice(file))
       } catch (error) {
         console.error('[imesg] voice synthesis failed:',
           error instanceof Error ? error.message : String(error))

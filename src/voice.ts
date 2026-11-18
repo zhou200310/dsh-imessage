@@ -14,7 +14,7 @@
  * @module dsh-imessage/voice
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -23,6 +23,33 @@ const VOICE_MARKER = /\[语音:\s*([^\]\n]+?)\s*\]/gu
 
 /** Voice used for synthesized replies (Mandarin, young female). */
 const DEFAULT_VOICE = 'zh-CN-XiaoyiNeural'
+
+/** Remote compute host that runs the voice service, when one is configured. */
+function remoteUrl(): string | undefined {
+  const configured = process.env['DSH_VOICE_URL']
+  if (configured !== undefined && configured.length > 0) return configured.replace(/\/+$/u, '')
+  return 'http://192.168.10.111:8090'
+}
+
+/** Whether a remote voice host is reachable right now. */
+async function remoteAlive(): Promise<boolean> {
+  const base = remoteUrl()
+  if (base === undefined) return false
+  try {
+    const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(4000) })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+/** Re-encode any inbound audio to the 16 kHz mono WAV the recognizers want. */
+async function toWav(path: string): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-wav-'))
+  const out = join(dir, 'audio.wav')
+  await run('ffmpeg', ['-y', '-v', 'error', '-i', path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', out])
+  return out
+}
 
 /** Directory holding the shared Python virtualenv and helper scripts. */
 function toolsDir(): string {
@@ -86,10 +113,29 @@ export function splitVoiceMarkers(text: string): { text: string; segments: strin
 export async function synthesize(text: string): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-'))
   const out = join(dir, 'reply.mp3')
+  const base = remoteUrl()
+  const voiceName = process.env['DSH_VOICE_NAME'] ?? DEFAULT_VOICE
+  if (base !== undefined && await remoteAlive()) {
+    try {
+      const response = await fetch(`${base}/tts?voice=${encodeURIComponent(voiceName)}`, {
+        method: 'POST',
+        body: text,
+        signal: AbortSignal.timeout(60_000),
+      })
+      if (response.ok) {
+        writeFileSync(out, Buffer.from(await response.arrayBuffer()))
+        return out
+      }
+      console.error('[imesg] remote tts refused:', response.status)
+    } catch (error) {
+      console.error('[imesg] remote tts failed, falling back to local:',
+        error instanceof Error ? error.message : String(error))
+    }
+  }
   try {
     await run(pythonPath(), [
       '-m', 'edge_tts',
-      '--voice', process.env['DSH_VOICE_NAME'] ?? DEFAULT_VOICE,
+      '--voice', voiceName,
       '--text', text,
       '--write-media', out,
     ])
@@ -107,6 +153,26 @@ export async function synthesize(text: string): Promise<string> {
  * @returns the transcript, or an empty string when nothing was recognized.
  */
 export async function transcribe(path: string, language?: string): Promise<string> {
+  const base = remoteUrl()
+  if (base !== undefined && await remoteAlive()) {
+    let wav: string | undefined
+    try {
+      wav = await toWav(path)
+      const query = language !== undefined && language.length > 0 ? `?lang=${encodeURIComponent(language)}` : ''
+      const response = await fetch(`${base}/stt${query}`, {
+        method: 'POST',
+        body: readFileSync(wav),
+        signal: AbortSignal.timeout(180_000),
+      })
+      if (response.ok) return (await response.text()).trim()
+      console.error('[imesg] remote stt refused:', response.status, (await response.text()).slice(0, 200))
+    } catch (error) {
+      console.error('[imesg] remote stt failed, falling back to local:',
+        error instanceof Error ? error.message : String(error))
+    } finally {
+      if (wav !== undefined) rmSync(join(wav, '..'), { recursive: true, force: true })
+    }
+  }
   const args = [join(toolsDir(), 'voice-stt.py'), path]
   if (language !== undefined && language.length > 0) args.push(language)
   const stdout = await run(pythonPath(), args)

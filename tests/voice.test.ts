@@ -24,9 +24,11 @@ describe('voice markers in outbound text', () => {
 
   it('round-trips speech through synthesis and recognition', async () => {
     if (!canSynthesize() || !canTranscribe()) return
-    const file = await synthesize('我是大肥鱼')
+    const file = await synthesize('我是大肥鱼，不是吃白饭的')
     try {
       const heard = await transcribe(file, 'zh')
+      // Recognition is a model output, not a copy: assert it heard the phrase,
+      // not that it reproduced every character.
       expect(heard).toContain('大肥鱼')
     } finally {
       rmSync(file, { recursive: true, force: true })

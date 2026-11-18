@@ -303,7 +303,10 @@ export function acceptsInboundMessage(
   id: string
   platform: 'imessage'
   direction: 'inbound'
-  content: { type: 'text'; text: string } | { type: 'attachment'; mimeType: string; name: string; read: () => Promise<Buffer> }
+  content:
+    | { type: 'text'; text: string }
+    | { type: 'attachment'; mimeType: string; name: string; read: () => Promise<Buffer> }
+    | { type: 'voice'; mimeType: string; name?: string; read: () => Promise<Buffer> }
   sender: { id?: string; address?: string; service?: string }
   space: { type: 'dm'; phone: string }
 } {
@@ -312,7 +315,9 @@ export function acceptsInboundMessage(
   const content = raw.content as Record<string, unknown>
   const contentType = content['type']
   const isText = contentType === 'text' && typeof content['text'] === 'string'
-  const isAttachment = contentType === 'attachment' && typeof content['mimeType'] === 'string'
+  // iMessage delivers a recorded voice note as `voice`, not `attachment`.
+  const isAttachment = (contentType === 'attachment' || contentType === 'voice')
+    && typeof content['mimeType'] === 'string'
   if (!isText && !isAttachment) return false
   if (!raw.sender || typeof raw.sender !== 'object') return false
   const sender = raw.sender as Record<string, unknown>
@@ -355,16 +360,20 @@ async function* mapMessages(
     if (content.type === 'text') {
       text = content.text
     } else {
+      console.log('[imesg-diag] inbound media:', content.type, content.mimeType)
       // Attachment-only message: decode every attachment so the router can store it
       // as an ImageBlock (raster) or a FileBlock (anything else).
       try {
         const buffer = await content.read()
+        const name = content.name
         attachments = [{
           data: new Uint8Array(buffer),
           mimeType: content.mimeType,
-          ...(content.name.length === 0 ? {} : { name: content.name }),
+          ...(name === undefined || name.length === 0 ? {} : { name }),
         }]
-      } catch {
+      } catch (error) {
+        console.error('[imesg] inbound media unreadable:', content.type, content.mimeType,
+          error instanceof Error ? error.message : String(error))
         continue
       }
     }
