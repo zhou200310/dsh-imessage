@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -611,7 +612,12 @@ export class SessionRouter {
       try {
         file = await synthesize(segment)
         // Send as a voice note so iMessage renders a playable bubble, not a file.
-        await channel.send(voice(file))
+        // The duration hint is what keeps the bubble from collapsing to a stub.
+        const duration = await probeAudioSeconds(file)
+        await channel.send(voice(file, {
+          mimeType: 'audio/mp4',
+          ...(duration === undefined ? {} : { duration }),
+        }))
       } catch (error) {
         console.error('[imesg] voice synthesis failed:',
           error instanceof Error ? error.message : String(error))
@@ -696,6 +702,25 @@ export class SessionRouter {
 function installSelection(agentCtx: Context, selection: ModelSelection): void {
   const ref: ModelSelectionRef = { current: selection, assembled: undefined }
   installModelSelection(agentCtx, ref)
+}
+
+/** Read one audio file's duration in seconds; undefined when ffprobe fails. */
+async function probeAudioSeconds(path: string): Promise<number | undefined> {
+  try {
+    const out = await new Promise<string>((resolve, reject) => {
+      const child = spawn('ffprobe', [
+        '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', path,
+      ], { stdio: ['ignore', 'pipe', 'ignore'] })
+      let stdout = ''
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk })
+      child.on('error', reject)
+      child.on('close', code => code === 0 ? resolve(stdout) : reject(new Error(`ffprobe exited ${code}`)))
+    })
+    const value = Number.parseFloat(out.trim())
+    return Number.isFinite(value) ? value : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function assistantParts(content: readonly unknown[]): { text: string; attachments: OutboundAttachment[] } {

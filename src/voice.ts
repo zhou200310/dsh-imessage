@@ -93,9 +93,18 @@ export async function synthesize(text: string): Promise<string> {
     throw new Error(`voice host /tts ${response.status}: ${(await response.text()).slice(0, 200)}`)
   }
   const dir = mkdtempSync(join(tmpdir(), 'dsh-voice-'))
-  const out = join(dir, 'reply.mp3')
-  writeFileSync(out, Buffer.from(await response.arrayBuffer()))
-  return out
+  const mp3 = join(dir, 'reply.mp3')
+  writeFileSync(mp3, Buffer.from(await response.arrayBuffer()))
+  // iMessage voice notes are AAC in an MP4 container; a bare MP3 arrives as a
+  // one-second stub the phone cannot play.
+  const m4a = join(dir, 'reply.m4a')
+  try {
+    await run('ffmpeg', ['-y', '-v', 'error', '-i', mp3, '-c:a', 'aac', '-b:a', '64k', m4a])
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true })
+    throw error
+  }
+  return m4a
 }
 
 /** Re-encode any inbound audio to the 16 kHz mono WAV the recognizer wants. */
