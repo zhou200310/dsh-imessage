@@ -47,16 +47,25 @@
 
 ## 快速开始
 
-```bash
-# 安装（注意：需在 0.2.2 下冷启动）
-dsh plugin --profile web add dsh-imessage
+**从预构建包安装（推荐）** —— 装的就是本适配版，无需自己构建：
 
-# 冷启动 dsh（fnOS 应用中心停一下再启动；不要热重载 / kill）
-# 重启后：设置 → iMessage → Authorize → 完成 Photon 设备登录
-# → 填发送号码 → 拿到托管号 → Retry listener（如需）
+```bash
+dsh plugin --profile web add https://github.com/zhou200310/dsh-imessage/releases/download/v0.2.2/dsh-imessage-0.2.2.tgz
 ```
 
-> 若直接安装因版本不兼容被拒，先在 profile 的 `compatibility.json` 加 `"dsh-imessage@0.2.0": ["0.2.2-rc.1"]` 豁免。
+**从源码安装**（会跑一次 `npm run build`）：
+
+```bash
+dsh plugin --profile web add github:zhou200310/dsh-imessage
+```
+
+装完**冷启动** dsh（fnOS 应用中心停一下再启动；不要热重载 / kill）。重启后：
+
+设置 → iMessage → Authorize → 完成 Photon 设备登录 → 填发送号码 → 拿到托管号 → Retry listener（如需）。
+
+> 如果此前装过 npm 上的上游 `dsh-imessage@0.2.0`，先移除再装本包；两者包名相同，pnpm 会用后装的覆盖前者。
+>
+> 宿主版本低于 `0.2.2-rc.1` 时安装会被兼容性检查拦下——本包只针对 0.2.2 的 API 适配，请在 `0.2.2-rc.1` 上使用。
 
 ## 从源码构建
 
