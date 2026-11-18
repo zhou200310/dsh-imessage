@@ -5,7 +5,7 @@ import { hostAlive, splitVoiceMarkers, synthesize, transcribe } from '../src/voi
 describe('voice markers in outbound text', () => {
   it('pulls a spoken segment out and keeps the rest', () => {
     const { text, segments } = splitVoiceMarkers('说完了。\n[语音: 我是大肥鱼]\n这句留着')
-    expect(segments).toEqual(['我是大肥鱼'])
+    expect(segments).toEqual([{ text: '我是大肥鱼' }])
     expect(text).not.toContain('[语音:')
     expect(text).toContain('说完了。')
     expect(text).toContain('这句留着')
@@ -13,7 +13,12 @@ describe('voice markers in outbound text', () => {
 
   it('collects several segments in order', () => {
     const { segments } = splitVoiceMarkers('[语音: 第一句] 中间 [语音: 第二句]')
-    expect(segments).toEqual(['第一句', '第二句'])
+    expect(segments).toEqual([{ text: '第一句' }, { text: '第二句' }])
+  })
+
+  it('reads rate and pitch when the agent supplies them', () => {
+    const { segments } = splitVoiceMarkers('[语音: 哼，那当然 | +8% | +3Hz]')
+    expect(segments).toEqual([{ text: '哼，那当然', rate: '+8%', pitch: '+3Hz' }])
   })
 
   it('ignores text without markers', () => {
@@ -24,7 +29,7 @@ describe('voice markers in outbound text', () => {
 
   it('round-trips speech through the compute host', async () => {
     if (!await hostAlive()) return
-    const file = await synthesize('我是大肥鱼，不是吃白饭的')
+    const file = await synthesize({ text: '我是大肥鱼，不是吃白饭的' })
     try {
       const heard = await transcribe(file, 'zh')
       // Recognition is a model output, not a copy: assert it heard the phrase,

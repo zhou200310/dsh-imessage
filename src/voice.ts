@@ -23,7 +23,16 @@ import { join } from 'node:path'
 const VOICE_MARKER = /\[语音:\s*([^\]\n]+?)\s*\]/gu
 
 /** Voice used for synthesized replies (Mandarin, young female). */
-const DEFAULT_VOICE = 'zh-CN-XiaoyiNeural'
+const DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural'
+
+/** One spoken line, with the prosody the agent asked for. */
+export interface VoiceSegment {
+  text: string
+  /** edge-tts rate, e.g. `+10%`. */
+  rate?: string
+  /** edge-tts pitch, e.g. `+3Hz`. */
+  pitch?: string
+}
 
 /** How long to wait for the host's health probe before giving up. */
 const HEALTH_TIMEOUT_MS = 4000
@@ -66,10 +75,19 @@ function run(command: string, args: readonly string[]): Promise<string> {
  * @param text - the answer as the agent authored it.
  * @returns the text with markers removed, plus the spoken segments in order.
  */
-export function splitVoiceMarkers(text: string): { text: string; segments: string[] } {
-  const segments: string[] = []
+export function splitVoiceMarkers(text: string): { text: string; segments: VoiceSegment[] } {
+  const segments: VoiceSegment[] = []
   const stripped = text.replace(VOICE_MARKER, (_match, spoken: string) => {
-    segments.push(spoken)
+    // `[语音: 文本 | +10% | +3Hz]` — rate and pitch are optional; a flat voice
+    // reads as a machine, so the agent can lift it when the line is playful.
+    const [rawText, rate, pitch] = spoken.split('|').map(part => part.trim())
+    if (rawText !== undefined && rawText.length > 0) {
+      segments.push({
+        text: rawText,
+        ...(rate !== undefined && rate.length > 0 ? { rate } : {}),
+        ...(pitch !== undefined && pitch.length > 0 ? { pitch } : {}),
+      })
+    }
     return ''
   })
   return { text: stripped, segments }
@@ -81,12 +99,15 @@ export function splitVoiceMarkers(text: string): { text: string; segments: strin
  * @returns absolute path of the audio file; the caller owns cleanup.
  * @throws when the host is unreachable or refuses the request.
  */
-export async function synthesize(text: string): Promise<string> {
+export async function synthesize(segment: VoiceSegment): Promise<string> {
   const base = remoteUrl()
   const voiceName = process.env['DSH_VOICE_NAME'] ?? DEFAULT_VOICE
-  const response = await fetch(`${base}/tts?voice=${encodeURIComponent(voiceName)}`, {
+  const params = new URLSearchParams({ voice: voiceName })
+  if (segment.rate !== undefined) params.set('rate', segment.rate)
+  if (segment.pitch !== undefined) params.set('pitch', segment.pitch)
+  const response = await fetch(`${base}/tts?${params.toString()}`, {
     method: 'POST',
-    body: text,
+    body: segment.text,
     signal: AbortSignal.timeout(60_000),
   })
   if (!response.ok) {

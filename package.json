@@ -1,6 +1,6 @@
 {
   "name": "dsh-imessage",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "iMessage transport for DeepSeek Harness 0.2.2 (Photon/Spectrum), adapted from photon-hq/dsh-imessage",
   "type": "module",
   "license": "Apache-2.0",

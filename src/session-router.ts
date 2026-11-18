@@ -25,7 +25,7 @@ import { PLUGIN_ID } from './constants.js'
 import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
 import { resolveMeme, splitMemeMarkers } from './memes.js'
-import { hostAlive, splitVoiceMarkers, synthesize, transcribe } from './voice.js'
+import { hostAlive, splitVoiceMarkers, synthesize, transcribe, type VoiceSegment } from './voice.js'
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
 import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
@@ -601,7 +601,7 @@ export class SessionRouter {
   }
 
   /** Speak the `[语音: …]` segments and deliver them as audio attachments. */
-  private async sendVoice(channel: SpectrumInboundMessage, segments: readonly string[]): Promise<void> {
+  private async sendVoice(channel: SpectrumInboundMessage, segments: readonly VoiceSegment[]): Promise<void> {
     if (segments.length === 0) return
     if (!await hostAlive()) {
       console.error('[imesg] voice host unreachable; skipping', segments.length, 'spoken segment(s)')
