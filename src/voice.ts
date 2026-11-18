@@ -80,12 +80,18 @@ export function splitVoiceMarkers(text: string): { text: string; segments: Voice
   const stripped = text.replace(VOICE_MARKER, (_match, spoken: string) => {
     // `[语音: 文本 | +10% | +3Hz]` — rate and pitch are optional; a flat voice
     // reads as a machine, so the agent can lift it when the line is playful.
-    const [rawText, rate, pitch] = spoken.split('|').map(part => part.trim())
+    // Only a token that actually looks like a knob is treated as one: a stray
+    // `|` in the sentence must stay in the sentence, never be read aloud.
+    const [rawText, ...rest] = spoken.split('|').map(part => part.trim())
+    const isRate = (value: string | undefined): value is string => value !== undefined && /^[+-]\d+%$/u.test(value)
+    const isPitch = (value: string | undefined): value is string => value !== undefined && /^[+-]\d+(?:\.\d+)?Hz$/u.test(value)
+    const rate = isRate(rest[0]) ? rest[0] : undefined
+    const pitch = isPitch(rest[1]) ? rest[1] : undefined
     if (rawText !== undefined && rawText.length > 0) {
       segments.push({
         text: rawText,
-        ...(rate !== undefined && rate.length > 0 ? { rate } : {}),
-        ...(pitch !== undefined && pitch.length > 0 ? { pitch } : {}),
+        ...(rate === undefined ? {} : { rate }),
+        ...(pitch === undefined ? {} : { pitch }),
       })
     }
     return ''
