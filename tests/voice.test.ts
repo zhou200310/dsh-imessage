@@ -21,6 +21,14 @@ describe('voice markers in outbound text', () => {
     expect(segments).toEqual([{ text: '哼，那当然', rate: '+8%', pitch: '+3Hz' }])
   })
 
+  it('reads a performance direction as the second field', () => {
+    const { segments } = splitVoiceMarkers('[语音: 【轻笑】哼，那当然 | 情境：被夸，嘴上不服气]')
+    expect(segments).toEqual([{
+      text: '【轻笑】哼，那当然',
+      instructions: '情境：被夸，嘴上不服气',
+    }])
+  })
+
   it('ignores text without markers', () => {
     const { text, segments } = splitVoiceMarkers('纯文字')
     expect(segments).toEqual([])

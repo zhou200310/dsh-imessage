@@ -25,13 +25,19 @@ const VOICE_MARKER = /\[语音:\s*([^\]\n]+?)\s*\]/gu
 /** Voice used for synthesized replies (Mandarin, young female). */
 const DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural'
 
-/** One spoken line, with the prosody the agent asked for. */
+/** One spoken line, with the direction the agent asked for. */
 export interface VoiceSegment {
   text: string
   /** edge-tts rate, e.g. `+10%`. */
   rate?: string
   /** edge-tts pitch, e.g. `+3Hz`. */
   pitch?: string
+  /**
+   * Performance direction for the expressive engine (Breeze TTS 2): situation,
+   * speaking intent, and where the emphasis lands. Its presence selects that
+   * engine; without it the line falls back to edge-tts prosody knobs.
+   */
+  instructions?: string
 }
 
 /** How long to wait for the host's health probe before giving up. */
@@ -82,18 +88,20 @@ export function splitVoiceMarkers(text: string): { text: string; segments: Voice
     // reads as a machine, so the agent can lift it when the line is playful.
     // Only a token that actually looks like a knob is treated as one: a stray
     // `|` in the sentence must stay in the sentence, never be read aloud.
-    const [rawText, ...rest] = spoken.split('|').map(part => part.trim())
-    const isRate = (value: string | undefined): value is string => value !== undefined && /^[+-]\d+%$/u.test(value)
-    const isPitch = (value: string | undefined): value is string => value !== undefined && /^[+-]\d+(?:\.\d+)?Hz$/u.test(value)
-    const rate = isRate(rest[0]) ? rest[0] : undefined
-    const pitch = isPitch(rest[1]) ? rest[1] : undefined
-    if (rawText !== undefined && rawText.length > 0) {
-      segments.push({
-        text: rawText,
-        ...(rate === undefined ? {} : { rate }),
-        ...(pitch === undefined ? {} : { pitch }),
-      })
-    }
+    const [rawText, second, third] = spoken.split('|').map(part => part.trim())
+    const isRate = (value: string | undefined): boolean => value !== undefined && /^[+-]\d+%$/u.test(value)
+    const isPitch = (value: string | undefined): boolean => value !== undefined && /^[+-]\d+(?:\.\d+)?Hz$/u.test(value)
+    if (rawText === undefined || rawText.length === 0) return ''
+    // Second field is either an edge-tts knob or a performance direction.
+    const rate = isRate(second) ? second : undefined
+    const pitch = isRate(second) && isPitch(third) ? third : undefined
+    const instructions = isRate(second) ? undefined : second
+    segments.push({
+      text: rawText,
+      ...(rate === undefined ? {} : { rate }),
+      ...(pitch === undefined ? {} : { pitch }),
+      ...(instructions === undefined || instructions.length === 0 ? {} : { instructions }),
+    })
     return ''
   })
   return { text: stripped, segments }
@@ -108,9 +116,16 @@ export function splitVoiceMarkers(text: string): { text: string; segments: Voice
 export async function synthesize(segment: VoiceSegment): Promise<string> {
   const base = remoteUrl()
   const voiceName = process.env['DSH_VOICE_NAME'] ?? DEFAULT_VOICE
-  const params = new URLSearchParams({ voice: voiceName })
-  if (segment.rate !== undefined) params.set('rate', segment.rate)
-  if (segment.pitch !== undefined) params.set('pitch', segment.pitch)
+  const params = new URLSearchParams()
+  if (segment.instructions !== undefined && segment.instructions.length > 0) {
+    // Expressive engine: a performance direction, not prosody knobs.
+    params.set('engine', 'breeze')
+    params.set('instructions', segment.instructions)
+  } else {
+    params.set('voice', voiceName)
+    if (segment.rate !== undefined) params.set('rate', segment.rate)
+    if (segment.pitch !== undefined) params.set('pitch', segment.pitch)
+  }
   const response = await fetch(`${base}/tts?${params.toString()}`, {
     method: 'POST',
     body: segment.text,
