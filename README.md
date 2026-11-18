@@ -26,7 +26,9 @@
 
 完整踩坑记录、重建步骤、依赖版本锁定、排查技巧见 **[ADAPTATION.md](ADAPTATION.md)**。
 
-## 多模态支持
+## 多模态支持（双向）
+
+**收：iPhone → DSH**
 
 | 附件类型 | 处理方式 |
 |---|---|
@@ -34,6 +36,17 @@
 | 视频 / pdf / 语音 / 文档 / 其他 | `attachments.saveFile()` → **FileBlock**，请求组装时投影成句柄（文件名+字节数+只读路径） |
 
 单张被拒（格式/大小不合规）只回一句提示，不吞掉整个 turn。
+
+**发：DSH → iPhone**
+
+Agent 回答里带的图片和文件，按原生 iMessage 附件发出去：
+
+| 回答里的块 | 出站处理 |
+|---|---|
+| `image`（ImageAttachmentRef） | `attachments.readImage()` 读回字节 → Spectrum `attachment(buffer, { mimeType })` |
+| `file`（FileAttachmentRef） | `hostPath` 直读；非宿主后端回落到 `readFileStream()` 收齐再发 |
+
+文本仍然先发（切块），附件按 turn 内产生顺序跟在后面；单个附件发失败只记日志，不影响其余部分。
 
 能力边界：语音/视频不会「被理解」内容——FileBlock 在模型侧是句柄文本，模型知道文件存在与路径，图片才是真进上下文。
 

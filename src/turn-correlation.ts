@@ -1,6 +1,16 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PluginError } from './errors.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
+
+/** One attachment the agent produced, delivered back over the same DM. */
+export type OutboundAttachment = ImageAttachmentRef | FileAttachmentRef
+
+/** Final answer for one owned turn: text, attachments, or both. */
+export interface TurnOutcome {
+  text?: string
+  attachments: readonly OutboundAttachment[]
+}
 
 interface TurnWait {
   agent: Agent
@@ -8,7 +18,8 @@ interface TurnWait {
   channel: SpectrumInboundMessage
   turn?: number
   lastText?: string
-  resolve(value: string | undefined): void
+  lastAttachments: OutboundAttachment[]
+  resolve(value: TurnOutcome | undefined): void
   reject(error: Error): void
 }
 
@@ -19,9 +30,9 @@ export class TurnCorrelation {
   private readonly ownedTurn = new WeakMap<Agent, TurnWait>()
 
   /** Register one plugin-authored message before it enters the Agent inbox. */
-  begin(agent: Agent, messageId: string, channel: SpectrumInboundMessage): Promise<string | undefined> {
+  begin(agent: Agent, messageId: string, channel: SpectrumInboundMessage): Promise<TurnOutcome | undefined> {
     return new Promise((resolve, reject) => {
-      this.waitsByMessage.set(messageId, { agent, messageId, channel, resolve, reject })
+      this.waitsByMessage.set(messageId, { agent, messageId, channel, lastAttachments: [], resolve, reject })
     })
   }
 
@@ -52,10 +63,17 @@ export class TurnCorrelation {
     )
   }
 
-  /** Retain only the latest final assistant message for the exact owned turn. */
-  assistant(sessionId: string, turn: number, text: string): void {
+  /** Retain the latest final assistant message and its attachments for the exact owned turn. */
+  assistant(
+    sessionId: string,
+    turn: number,
+    text: string,
+    attachments: readonly OutboundAttachment[] = [],
+  ): void {
     const wait = this.waitsByTurn.get(turnKey(sessionId, turn))
-    if (wait !== undefined && text.length > 0) wait.lastText = text
+    if (wait === undefined) return
+    if (text.length > 0) wait.lastText = text
+    if (attachments.length > 0) wait.lastAttachments.push(...attachments)
   }
 
   /** Resolve the final text for the exact owned turn; unrelated turns fall through. */
@@ -65,7 +83,15 @@ export class TurnCorrelation {
     if (wait === undefined) return
     this.waitsByTurn.delete(key)
     if (this.ownedTurn.get(wait.agent) === wait) this.ownedTurn.delete(wait.agent)
-    wait.resolve(wait.lastText)
+    const hasText = wait.lastText !== undefined && wait.lastText.length > 0
+    if (!hasText && wait.lastAttachments.length === 0) {
+      wait.resolve(undefined)
+      return
+    }
+    wait.resolve({
+      ...(hasText ? { text: wait.lastText } : {}),
+      attachments: wait.lastAttachments,
+    })
   }
 
   /** Whether this Agent's currently correlated turn belongs to iMessage. */

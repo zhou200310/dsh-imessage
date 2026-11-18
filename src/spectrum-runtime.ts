@@ -1,4 +1,4 @@
-import { Spectrum, type PlatformProviderConfig, type SpectrumInstance } from '@spectrum-ts/core'
+import { Spectrum, type ContentInput, type PlatformProviderConfig, type SpectrumInstance } from '@spectrum-ts/core'
 import { imessage } from '@spectrum-ts/imessage'
 import { PluginError } from './errors.js'
 import type { RuntimeView } from './types.js'
@@ -41,8 +41,8 @@ export interface SpectrumInboundMessage {
   attachments?: readonly InboundAttachment[]
   /** Run work while Spectrum maintains typing state. */
   responding<T>(callback: () => Promise<T>): Promise<T>
-  /** Send one plain-text iMessage to the same DM. */
-  send(text: string): Promise<void>
+  /** Send text or an attachment to the same DM. */
+  send(content: ContentInput): Promise<void>
 }
 
 /** Running Spectrum connection behind an injectable adapter seam. */

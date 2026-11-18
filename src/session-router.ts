@@ -22,7 +22,8 @@ import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
-import { TurnCorrelation } from './turn-correlation.js'
+import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
+import { attachment, type ContentBuilder } from '@spectrum-ts/core'
 
 interface AgentBinding {
   agent: Agent
@@ -182,16 +183,20 @@ export class SessionRouter {
     console.log("[imesg-diag] processPrompt start:", prompt.slice(0, 80))
     const agent = await this.ensureActiveAgent()
     console.log("[imesg-diag] agent ready:", agent.id)
-    const response = await message.responding(() => this.runTurn(agent, message, prompt))
-    console.log("[imesg-diag] turn response:", response === undefined ? "undefined" : response.slice(0, 80))
-    if (response !== undefined && response.trim().length > 0) await this.send(message, response)
+    const outcome = await message.responding(() => this.runTurn(agent, message, prompt))
+    console.log("[imesg-diag] turn outcome:", outcome === undefined
+      ? "undefined"
+      : `text=${outcome.text?.slice(0, 60) ?? ""} attachments=${outcome.attachments.length}`)
+    if (outcome === undefined) return
+    if (outcome.text !== undefined && outcome.text.trim().length > 0) await this.send(message, outcome.text)
+    if (outcome.attachments.length > 0) await this.sendAttachments(message, outcome.attachments)
   }
 
   private async runTurn(
     agent: Agent,
     channel: SpectrumInboundMessage,
     prompt: string,
-  ): Promise<string | undefined> {
+  ): Promise<TurnOutcome | undefined> {
     // dsh 0.2.x removed the catch-all 'plugin' source kind; a plain user source
     // is what the agent loop claims into the turn (unknown kinds are dropped).
     const content: ContentBlock[] = prompt.length === 0 ? [] : [{ type: 'text', text: prompt }]
@@ -255,8 +260,8 @@ export class SessionRouter {
       console.log("[imesg-diag] session event:", event.type, "seq=", event.seq)
     }
     if (event.type === 'assistant/message') {
-      const text = assistantText(event.data.message.content)
-      this.turns.assistant(sessionId, event.data.turn, text)
+      const parts = assistantParts(event.data.message.content)
+      this.turns.assistant(sessionId, event.data.turn, parts.text, parts.attachments)
       return
     }
     if (event.type !== 'turn/end') return
@@ -571,6 +576,39 @@ export class SessionRouter {
   private async send(channel: SpectrumInboundMessage, text: string): Promise<void> {
     for (const chunk of chunkText(text, this.options.maxOutboundChars)) await channel.send(chunk)
   }
+
+  /** Deliver attachments the agent produced, in the order the turn emitted them. */
+  private async sendAttachments(
+    channel: SpectrumInboundMessage,
+    refs: readonly OutboundAttachment[],
+  ): Promise<void> {
+    for (const ref of refs) {
+      try {
+        const builder = await this.attachmentBuilder(ref)
+        await channel.send(builder)
+      } catch (error) {
+        // One undeliverable attachment must not swallow the rest of the answer.
+        console.error('[imesg] outbound attachment failed:',
+          error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  /** Turn one durable attachment reference into a Spectrum attachment builder. */
+  private async attachmentBuilder(ref: OutboundAttachment): Promise<ContentBuilder> {
+    if ('mediaType' in ref) {
+      const stored = await this.ctx.attachments.readImage(ref)
+      return attachment(Buffer.from(stored.data), {
+        mimeType: ref.mediaType,
+        ...(ref.name === undefined ? {} : { name: ref.name }),
+      })
+    }
+    const hostPath = this.ctx.attachments.fileHostPath(ref)
+    if (hostPath !== undefined) return attachment(hostPath, { name: ref.name })
+    const chunks: Uint8Array[] = []
+    for await (const chunk of this.ctx.attachments.readFileStream(ref)) chunks.push(chunk)
+    return attachment(Buffer.concat(chunks), { name: ref.name })
+  }
 }
 
 function installSelection(agentCtx: Context, selection: ModelSelection): void {
@@ -578,15 +616,25 @@ function installSelection(agentCtx: Context, selection: ModelSelection): void {
   installModelSelection(agentCtx, ref)
 }
 
-function assistantText(content: readonly unknown[]): string {
-  const text = content.flatMap(block => {
-    if (!block || typeof block !== 'object') return []
+function assistantParts(content: readonly unknown[]): { text: string; attachments: OutboundAttachment[] } {
+  const text: string[] = []
+  const attachments: OutboundAttachment[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
     const record = block as Record<string, unknown>
-    return record['type'] === 'text' && typeof record['text'] === 'string' ? [record['text']] : []
-  }).join('')
-  // iMessage is text-only: deliver the answer as plain text instead of raw
-  // markdown markers. Commands and errors are authored plain and never pass here.
-  return markdownToPlainText(text)
+    if (record['type'] === 'text' && typeof record['text'] === 'string') {
+      text.push(record['text'])
+      continue
+    }
+    // Images and files the agent attached to its answer travel as native
+    // iMessage attachments instead of being dropped.
+    if ((record['type'] === 'image' || record['type'] === 'file') && record['attachment'] !== undefined) {
+      attachments.push(record['attachment'] as OutboundAttachment)
+    }
+  }
+  // Text still ships as plain text: iMessage shows raw markdown markers.
+  // Commands and errors are authored plain and never pass here.
+  return { text: markdownToPlainText(text.join('')), attachments }
 }
 
 function assertNoArguments(command: ParsedCommand): void {
