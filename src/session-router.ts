@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -25,7 +25,8 @@ import { PLUGIN_ID } from './constants.js'
 import { PluginError, publicError } from './errors.js'
 import { InteractionBroker } from './interactions.js'
 import { resolveMeme, splitMemeMarkers } from './memes.js'
-import { hostAlive, splitVoiceMarkers, synthesize, transcribe, type VoiceSegment } from './voice.js'
+import { hostAlive, splitVoiceMarkers, synthesize, transcribe, voiceConfigured, type VoiceSegment } from './voice.js'
+import { heicToJpeg, isHeic, jpegName } from './media.js'
 import { presetForResume, selectionForResume } from './session-selection.js'
 import type { SpectrumInboundMessage } from './spectrum-runtime.js'
 import { TurnCorrelation, type OutboundAttachment, type TurnOutcome } from './turn-correlation.js'
@@ -208,17 +209,52 @@ export class SessionRouter {
     const content: ContentBlock[] = prompt.length === 0 ? [] : [{ type: 'text', text: prompt }]
     for (const item of channel.attachments ?? []) {
       try {
-        if (IMAGE_MEDIA_TYPES.has(item.mimeType)) {
+        if (IMAGE_MEDIA_TYPES.has(item.mimeType) || isHeic(item.mimeType)) {
           // Raster: store as a normalized image so the model sees actual pixels.
-          const attachment = await this.ctx.attachments.saveImage({
-            data: item.data,
-            mediaType: item.mimeType as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
-            ...(item.name === undefined ? {} : { name: item.name }),
-          })
-          content.push({ type: 'image', attachment })
+          // iPhone photos are HEIC, which sharp refuses — convert once here so
+          // the sender never has to think about camera formats.
+          let data = item.data
+          let mediaType = item.mimeType
+          let name = item.name
+          if (isHeic(mediaType)) {
+            try {
+              data = await heicToJpeg(item.data)
+              mediaType = 'image/jpeg'
+              name = jpegName(name)
+              console.log('[imesg] heic → jpeg:', data.length, 'bytes')
+            } catch (error) {
+              console.error('[imesg] heic → jpeg failed (keeping original):',
+                error instanceof Error ? error.message : String(error))
+            }
+          }
+          if (!IMAGE_MEDIA_TYPES.has(mediaType)) {
+            // Conversion was impossible: fall back to a file handle so the
+            // picture is at least on disk instead of dropped.
+            const attachment = await this.ctx.attachments.saveFile({
+              data,
+              ...(name === undefined ? {} : { name }),
+            })
+            content.push({ type: 'file', attachment })
+          } else {
+            const attachment = await this.ctx.attachments.saveImage({
+              data,
+              mediaType: mediaType as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
+              ...(name === undefined ? {} : { name }),
+            })
+            content.push({ type: 'image', attachment })
+          }
         } else if (item.mimeType.startsWith('audio/')) {
           // A voice note is only useful as words: transcribe it so the model
           // receives text instead of an opaque file handle.
+          if (!voiceConfigured()) {
+            // No voice host on this machine: keep the turn alive and tell the
+            // sender the truth instead of pretending we could not hear them.
+            content.push({
+              type: 'text',
+              text: '（对方发来一条语音，但本机没有配置语音识别 DSH_VOICE_URL，转写不了）',
+            })
+            continue
+          }
           const transcript = await this.transcribeAttachment(item)
           if (transcript.length > 0) {
             content.push({ type: 'text', text: `（对方发来一条语音，转写如下）${transcript}` })
@@ -592,17 +628,60 @@ export class SessionRouter {
     // The Web client renders `[表情: …]` itself; over iMessage the marker has to
     // become the real image, so pull it out before the text goes out.
     const memed = splitMemeMarkers(text)
-    const voiced = splitVoiceMarkers(memed.text)
+    // Files the agent already rendered: send them verbatim, no synthesis.
+    const audioPaths: string[] = []
+    const withoutAudio = memed.text.replace(/\[音频:\s*([^\]\n]+?)\s*\]/gu, (_m, path: string) => {
+      audioPaths.push(path)
+      return ''
+    })
+    const voiced = splitVoiceMarkers(withoutAudio)
     if (voiced.text.trim().length > 0) {
       for (const chunk of chunkText(voiced.text, this.options.maxOutboundChars)) await channel.send(chunk)
     }
     await this.sendMemes(channel, memed.captions)
+    await this.sendAudioFiles(channel, audioPaths)
     await this.sendVoice(channel, voiced.segments)
   }
 
   /** Speak the `[语音: …]` segments and deliver them as audio attachments. */
+  /**
+   * Deliver an already-rendered audio file the agent produced elsewhere.
+   * `[音频: /abs/path.mp3]` — used when the audio comes from a pipeline the
+   * plugin did not synthesize (mixed music, edited voice, anything on disk).
+   */
+  private async sendAudioFiles(channel: SpectrumInboundMessage, paths: readonly string[]): Promise<void> {
+    for (const path of paths) {
+      try {
+        if (!existsSync(path)) {
+          console.error('[imesg] audio file missing:', path)
+          continue
+        }
+        const duration = await probeAudioSeconds(path)
+        console.log('[imesg] sending audio file:', path, 'dur', duration)
+        // A plain attachment is what actually lands as a playable file; the
+        // voice builder only renders bubbles for the audio we synthesize.
+        await channel.send(attachment(path, {
+          ...(path.endsWith('.m4a') ? { mimeType: 'audio/mp4' } : {}),
+        }))
+        console.log('[imesg] audio sent:', path)
+      } catch (error) {
+        console.log('[imesg] audio send failed:', path,
+          error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
   private async sendVoice(channel: SpectrumInboundMessage, segments: readonly VoiceSegment[]): Promise<void> {
     if (segments.length === 0) return
+    if (!voiceConfigured()) {
+      // Voice is optional. Without a host, say it instead of dropping it —
+      // a missing TTS box must never make the assistant look mute.
+      console.log('[imesg] no voice host configured; sending', segments.length, 'spoken segment(s) as text')
+      for (const segment of segments) {
+        for (const chunk of chunkText(segment.text, this.options.maxOutboundChars)) await channel.send(chunk)
+      }
+      return
+    }
     if (!await hostAlive()) {
       console.error('[imesg] voice host unreachable; skipping', segments.length, 'spoken segment(s)')
       return

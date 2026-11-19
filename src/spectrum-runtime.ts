@@ -348,6 +348,90 @@ function adaptSpectrum(
   }
 }
 
+/** Upper bound for one attachment transfer; big enough for a 4K photo, short
+ * enough that a dead link does not freeze the whole inbound stream. */
+const ATTACHMENT_READ_TIMEOUT_MS = 30_000
+
+/** Race a promise against a hard timeout so a hung read cannot stall forever. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([promise, guard])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/** The slice of Spectrum attachment content this module actually touches. */
+interface ReadableContent {
+  readonly type: string
+  readonly mimeType?: string | undefined
+  readonly size?: number | undefined
+  read(): Promise<unknown>
+  stream?: (() => Promise<AsyncIterable<unknown>>) | undefined
+}
+
+/** Normalize whatever the SDK handed back into bytes. */
+function toBuffer(value: unknown): Buffer | undefined {
+  if (value === undefined || value === null) return undefined
+  if (Buffer.isBuffer(value)) return value
+  if (value instanceof ArrayBuffer) return Buffer.from(value)
+  if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+  const sized = value as { length?: number }
+  if (typeof sized.length === 'number') return Buffer.from(value as ArrayLike<number>)
+  return undefined
+}
+
+/**
+ * Read one inbound attachment, falling back to the chunked stream API.
+ * @param content - the Spectrum message content to decode.
+ * @returns raw bytes, or undefined when every path failed.
+ */
+async function readAttachmentBytes(
+  content: ReadableContent,
+): Promise<Buffer | undefined> {
+  const declared = typeof content.size === 'number' ? content.size : undefined
+  console.log('[imesg-diag] attachment size:', declared ?? 'unknown', 'mime:', content.mimeType)
+  let firstError: unknown
+  try {
+    const value = await withTimeout(content.read(), ATTACHMENT_READ_TIMEOUT_MS, 'read()')
+    const bytes = toBuffer(value)
+    console.log('[imesg] read() ok:', bytes?.length ?? 0, 'bytes')
+    return bytes
+  } catch (error) {
+    firstError = error
+    console.error('[imesg] read() failed:', error instanceof Error ? error.message : String(error))
+  }
+  const openStream = content.stream
+  if (typeof openStream === 'function') {
+    try {
+      const joined = await withTimeout((async () => {
+        const chunks: Buffer[] = []
+        const stream = await openStream()
+        for await (const chunk of stream) {
+          const part = toBuffer(chunk)
+          if (part !== undefined) chunks.push(part)
+        }
+        return chunks.length > 0 ? Buffer.concat(chunks) : undefined
+      })(), ATTACHMENT_READ_TIMEOUT_MS, 'stream()')
+      if (joined !== undefined) {
+        console.log('[imesg] stream() recovered:', joined.length, 'bytes')
+        return joined
+      }
+      console.error('[imesg] stream() returned 0 bytes')
+    } catch (error) {
+      console.error('[imesg] stream() failed:', error instanceof Error ? error.message : String(error))
+    }
+  }
+  console.error('[imesg] inbound media unreadable:', content.type, content.mimeType,
+    firstError instanceof Error ? firstError.message : String(firstError))
+  return undefined
+}
+
 async function* mapMessages(
   app: SpectrumInstance,
   config: SpectrumConnectionConfig,
@@ -363,18 +447,22 @@ async function* mapMessages(
       console.log('[imesg-diag] inbound media:', content.type, content.mimeType)
       // Attachment-only message: decode every attachment so the router can store it
       // as an ImageBlock (raster) or a FileBlock (anything else).
-      try {
-        const buffer = await content.read()
+      //
+      // Spectrum's read() pulls the whole payload over gRPC in one shot and a
+      // multi-megabyte iPhone photo regularly gets cut off mid-transfer, so a
+      // plain await either hangs the message stream or throws. Bound it, retry
+      // through stream(), and if both paths fail keep the turn alive with a
+      // placeholder instead of swallowing the message.
+      const buffer = await readAttachmentBytes(content)
+      if (buffer === undefined) {
+        text = `[${content.type} ${content.mimeType ?? ''} 接收失败：附件读取中断，请重发或改发截图]`.trim()
+      } else {
         const name = content.name
         attachments = [{
           data: new Uint8Array(buffer),
           mimeType: content.mimeType,
           ...(name === undefined || name.length === 0 ? {} : { name }),
         }]
-      } catch (error) {
-        console.error('[imesg] inbound media unreadable:', content.type, content.mimeType,
-          error instanceof Error ? error.message : String(error))
-        continue
       }
     }
     yield {

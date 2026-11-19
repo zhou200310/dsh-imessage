@@ -45,11 +45,27 @@ export interface VoiceSegment {
 /** How long to wait for the host's health probe before giving up. */
 const HEALTH_TIMEOUT_MS = 4000
 
-/** Base URL of the voice service, without a trailing slash. */
-function remoteUrl(): string {
+/**
+ * Base URL of the voice service, without a trailing slash.
+ *
+ * There is deliberately no built-in default: a hard-coded LAN address would
+ * make every install silently talk to somebody else's machine. Unset means
+ * voice is off (text, images and files keep working), and the caller degrades
+ * to plain text instead of failing.
+ * @returns the configured origin, or undefined when voice is not set up.
+ */
+export function voiceHostUrl(): string | undefined {
   const configured = process.env['DSH_VOICE_URL']
-  if (configured !== undefined && configured.length > 0) return configured.replace(/\/+$/u, '')
-  return 'http://192.168.10.111:8090'
+  if (configured === undefined) return undefined
+  const trimmed = configured.trim().replace(/\/+$/u, '')
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * @returns whether a voice host is configured at all.
+ */
+export function voiceConfigured(): boolean {
+  return voiceHostUrl() !== undefined
 }
 
 /**
@@ -92,10 +108,12 @@ function hostRequest(
   })
 }
 
-/** Whether the compute host is reachable right now. */
+/** Whether the voice host is reachable right now. */
 export async function hostAlive(): Promise<boolean> {
+  const base = voiceHostUrl()
+  if (base === undefined) return false
   try {
-    const { status } = await hostRequest(`${remoteUrl()}/health`, undefined, HEALTH_TIMEOUT_MS)
+    const { status } = await hostRequest(`${base}/health`, undefined, HEALTH_TIMEOUT_MS)
     return status === 200
   } catch {
     return false
@@ -156,7 +174,8 @@ export function splitVoiceMarkers(text: string): { text: string; segments: Voice
  * @throws when the host is unreachable or refuses the request.
  */
 export async function synthesize(segment: VoiceSegment): Promise<string> {
-  const base = remoteUrl()
+  const base = voiceHostUrl()
+  if (base === undefined) throw new Error('voice host is not configured — set DSH_VOICE_URL (see README)')
   const voiceName = process.env['DSH_VOICE_NAME'] ?? DEFAULT_VOICE
   const params = new URLSearchParams()
   if (segment.instructions !== undefined && segment.instructions.length > 0) {
@@ -209,10 +228,12 @@ async function toWav(path: string): Promise<{ wav: string; cleanup: () => void }
  * @throws when the host is unreachable or refuses the request.
  */
 export async function transcribe(path: string, language?: string): Promise<string> {
+  const base = voiceHostUrl()
+  if (base === undefined) throw new Error('voice host is not configured — set DSH_VOICE_URL (see README)')
   const { wav, cleanup } = await toWav(path)
   try {
     const query = language !== undefined && language.length > 0 ? `?lang=${encodeURIComponent(language)}` : ''
-    const response = await hostRequest(`${remoteUrl()}/stt${query}`, readFileSync(wav), 180_000)
+    const response = await hostRequest(`${base}/stt${query}`, readFileSync(wav), 180_000)
     if (response.status !== 200) {
       throw new Error(`voice host /stt ${response.status}: ${response.data.toString('utf8').slice(0, 200)}`)
     }

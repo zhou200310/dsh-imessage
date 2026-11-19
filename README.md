@@ -36,6 +36,7 @@ iPhone「信息」 ← Photon ← Spectrum ← DSH 插件 ← agent 回复
 | 方向 | 类型 | 处理 |
 |---|---|---|
 | 收 | png / jpeg / webp / gif | `attachments.saveImage()` → **ImageBlock**，模型看到的是像素 |
+| 收 | **heic / heif**（iPhone 默认） | 先用 ImageMagick 转 JPEG 再进上下文；没有转换器则存成文件并说明 |
 | 收 | 语音 `audio/*` | `faster-whisper` 转写 → 文字进上下文 |
 | 收 | 视频 / pdf / 文档 | `attachments.saveFile()` → **FileBlock**（句柄：文件名 + 字节数 + 只读路径） |
 | 发 | 回答里的 image 块 | `readImage()` 读回字节 → Spectrum 附件 |
@@ -43,26 +44,50 @@ iPhone「信息」 ← Photon ← Spectrum ← DSH 插件 ← agent 回复
 
 单个附件失败只回一句提示或记日志，不会吞掉整个 turn。
 
-**语音**
+**语音（可选，默认关闭）**
 
 | 方向 | 触发 | 处理 |
 |---|---|---|
-| 收 | iPhone 语音 | 落临时文件 → `faster-whisper` tiny 转写 → 文字 |
-| 发 | 回答里写 `[语音: 文本]` | Edge-TTS（`zh-CN-XiaoyiNeural`）合成 mp3 → 音频附件 |
+| 收 | iPhone 语音 | 落临时文件 → 转写 → 文字进上下文 |
+| 发 | 回答里写 `[语音: 文本]` | 合成 m4a → 作为语音条发出 |
 
-语音工具链跑在共享 venv（`tools/tts-venv`），Node 侧零依赖、只 shell 调用；可用 `DSH_VOICE_TOOLS` / `DSH_VOICE_PYTHON` / `DSH_VOICE_NAME` 覆盖。入站识别纯本地，出站合成要能连微软，需要代理可达。
+语音需要一个**你自己能访问的语音宿主**（任何提供 `GET /health`、`POST /tts`、`POST /stt` 的 HTTP 服务），通过环境变量指过去：
+
+```bash
+DSH_VOICE_URL=http://127.0.0.1:8090      # 语音宿主地址
+DSH_VOICE_NAME=zh-CN-XiaoxiaoNeural      # 可选，默认中文女声
+DSH_VOICE_TOOLS=/path/to/scripts         # 可选，自定义合成脚本
+```
+
+**不配置也能正常用**：没有 `DSH_VOICE_URL` 时，`[语音: …]` 自动降级成普通文字消息发出，入站语音会得到一句"本机未配置语音识别"的说明——不会静默失败，也不会卡住会话。出站合成需要 `ffmpeg`（转 m4a），缺失只影响语音条。
 
 > 能力边界：视频和文档在模型侧只呈现为句柄文本（知道文件存在与路径），不会被"看懂"；图片是真进上下文；语音会被转写，所以内容听得懂，语气听不出来。
 
 **会话**
 新建会话自动 `resolveByPath(cwd)` 挂到匹配的工作区，不会掉进 Ungrouped；`/sessions` 可以翻页切换历史会话直接续聊。
 
+## 安装前先确认
+
+| 依赖 | 必需 | 用途 / 没有会怎样 |
+|---|---|---|
+| DeepSeek Harness `0.2.2-rc.1` | ✅ | 低版本会被兼容性检查拦下 |
+| Node `^22.19 \|\| >=24` | ✅ | 插件运行环境 |
+| Photon 账号（设备授权） | ✅ | iMessage 线路出口，没有就收发不了 |
+| ImageMagick（带 libheif） | 建议 | HEIC→JPEG；缺失时 iPhone 照片只能存成文件、进不了模型 |
+| ffmpeg | 可选 | 语音条转 m4a；缺失只影响语音 |
+| 语音宿主（`DSH_VOICE_URL`） | 可选 | `/tts`、`/stt`；没配则语音自动降级为文字 |
+
+```bash
+# Debian/Ubuntu 一次装齐
+sudo apt install imagemagick ffmpeg
+```
+
 ## 安装
 
 **预构建包（推荐）**
 
 ```bash
-dsh plugin --profile web add https://github.com/zhou200310/dsh-imessage/releases/latest/download/dsh-imessage-0.3.0.tgz
+dsh plugin --profile web add https://github.com/zhou200310/dsh-imessage/releases/latest/download/dsh-imessage-latest.tgz
 ```
 
 **从源码**
@@ -123,7 +148,8 @@ dsh plugin --profile web add github:zhou200310/dsh-imessage
 多半是网络：`app.photon.codes`、`spectrum.photon.codes` 在 Cloudflare 上，国内可直连。如果 Harness 被注入了指向机场的 `HTTPS_PROXY`，给 photon 域名加直连规则，否则节点一挂授权和监听一起失败。另外确认后台/熄屏时连接没被系统切断——0.2.2 起加了生命周期感知。
 
 **发了图但模型说没收到？**
-iPhone 默认发 HEIC，Spectrum 读附件常抛 `Connection dropped`。本适配版做了重试 + 占位 + HEIC→JPEG 转换（依赖系统 ImageMagick），仍失败会给你一句提示而不是静默丢弃。
+两个原因都已在插件里兜住：① iPhone 默认 HEIC，本版会用 ImageMagick 自动转 JPEG（`apt install imagemagick`，需带 libheif）；② Spectrum 读附件经常中途断（`Connection dropped`），本版有 30s 超时 + `stream()` 兜底重试，彻底失败会回一句占位提示，而不是把消息吞掉。
+转换器缺失时图不会进上下文模型，但会作为文件存盘并在会话里说明。
 
 **重启后要手动点 Retry listener？**
 已知问题（init 时 settings 未就绪导致自动 restart 被跳过）。已经在 init 里加延迟重试，若仍遇到点一次即可。
