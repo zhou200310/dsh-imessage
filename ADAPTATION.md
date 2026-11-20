@@ -161,3 +161,37 @@ workspace controller 自动 attach，但插件用 `ctx.agents.create()` 直接�
   if (workspace !== undefined) await workspace.attachSession(sessionId)
   ```
 - 失败只记日志，不影响会话本身可用
+
+## 附加修复：HEIC 图片收不到（2026-11-18）
+
+### 现象
+iPhone 发图片过来，DSH 会话里**什么都没出现**，agent 完全不知道有图。
+
+### 根因
+`lib/index.js` 的 `mapMessages()` 里，非文本消息读附件失败时直接 `continue`，
+整条消息被吞掉。iPhone 默认拍照格式是 **HEIC**，Spectrum 侧 `content.read()`
+对 `image/heic` 抛 `Connection dropped`，于是消息消失。
+
+日志特征：
+```
+[imesg-diag] inbound media: attachment image/heic
+[imesg] inbound media unreadable: attachment image/heic Connection dropped
+```
+
+### 修复（lib/index.js → mapMessages）
+1. `content.read()` 失败重试 3 次（间隔 0.8s / 1.6s）
+2. 仍失败时**不再 `continue`**，改成 `text = "[<type> <mime> 接收失败：…]"` 投递占位消息，
+   会话里至少留痕，agent 能回复"图没收到"
+
+### 临时绕过（不改代码）
+iPhone 设置 → 相机 → 格式 → **兼容性最佳**（JPEG）；或发图前先截图再发（截图是 PNG）。
+
+### 进一步：直接支持 HEIC（2026-11-18 追加）
+读得到字节之后，在投递前统一转 JPEG，DSH 那边就不用认识 HEIC 了：
+
+- 新增 `heicToJpeg(buffer)`：写临时 `.heic` → `ImageMagick convert -auto-orient -strip -quality 88` → 读回 JPEG
+- 转换器优先用绝对路径 `/usr/bin/convert`（dsh 进程的 PATH 不一定含 `/usr/bin`）
+- `mimeType` 改 `image/jpeg`，文件名后缀 `.heic/.heif` → `.jpg`
+- 转换失败只记日志，仍然按原样投递，不阻断消息
+
+系统依赖：ImageMagick 带 libheif（本机 `convert -list format` 里 `HEIC rw+`）。

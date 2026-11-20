@@ -390,7 +390,7 @@ export class DshPhotonImessageService extends TypertRemoteService {
       const credential = await this.resolveCredential()
       const settings = this.requireSettings().get()
       if (credential === undefined || settings.phoneNumber === undefined || settings.assignedPhoneNumber === undefined) {
-        throw new PluginError('runtime-failed', 'Authorize Photon and save a phone number before retrying iMessage.')
+        throw new PluginError('runtime-failed', '重试前先授权 Photon 并保存号码。')
       }
       await this.requireSpectrum().restart({
         projectId: credential.project.id,

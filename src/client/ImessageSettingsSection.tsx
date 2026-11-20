@@ -115,7 +115,7 @@ function AuthorizationCard({
   const canMutate = state.settingsWritable && state.credentialWritable && pending === undefined
   return (
     <article className="dsh-imessage-card">
-      <CardTitle number="1" title="Authorize Photon" status={authorizationLabel(state)} />
+      <CardTitle number="1" title="授权 Photon" status={authorizationLabel(state)} />
       {authorization.phase === 'authorized' ? (
         <p className="dsh-imessage-body">
           Signed in as <strong>{authorization.account.name ?? authorization.account.email}</strong>. The
@@ -158,7 +158,7 @@ function AuthorizationCard({
                 })
               }}
             >
-              {copied ? 'Copied' : 'Copy code'}
+              {copied ? '已复制' : '复制设备码'}
             </button>
             <button
               type="button"
@@ -181,7 +181,7 @@ function AuthorizationCard({
             disabled={!canMutate}
             onClick={authorize}
           >
-            {authorization.phase === 'disconnected' ? 'Authorize' : 'Reauthorize'}
+            {authorization.phase === 'disconnected' ? '授权' : '重新授权'}
           </button>
         </div>
       )}
@@ -226,8 +226,8 @@ function PhoneCard({
     <article className="dsh-imessage-card">
       <CardTitle
         number="2"
-        title="Choose your sending number"
-        status={state.assignedPhoneNumber === undefined ? 'Not configured' : 'Configured'}
+        title="选择发送号码"
+        status={state.assignedPhoneNumber === undefined ? '未配置' : '已配置'}
       />
       <p className="dsh-imessage-body">
         Enter the personal number that will text Photon’s hosted number. It must be a full E.164 number.
@@ -264,7 +264,7 @@ function PhoneCard({
             disabled={!valid || !authorized || !projectReady || pending !== undefined
               || !state.settingsWritable || !state.credentialWritable}
           >
-            {pending === 'save-phone' ? 'Provisioning…' : 'Save number'}
+            {pending === 'save-phone' ? '正在下发…' : '保存号码'}
           </button>
         </div>
       </form>
@@ -284,13 +284,13 @@ function LineCard({
   const [copied, setCopied] = useState(false)
   const assigned = state.assignedPhoneNumber
   const disconnect = (): void => {
-    if (!window.confirm('Disconnect local iMessage routing? Photon projects and users will be preserved.')) return
+    if (!window.confirm('断开本地 iMessage 路由？Photon 上的项目和用户会保留。')) return
     void controller.disconnect(state.revision)
   }
 
   return (
     <article className="dsh-imessage-card">
-      <CardTitle number="3" title="Text your hosted line" status={runtimeLabel(state.runtime)} />
+      <CardTitle number="3" title="给你的托管号发消息" status={runtimeLabel(state.runtime)} />
       {assigned === undefined ? (
         <p className="dsh-imessage-body">Your hosted iMessage number appears here after the sender is saved.</p>
       ) : (
@@ -311,7 +311,7 @@ function LineCard({
                   })
                 }}
               >
-                {copied ? 'Copied' : 'Copy'}
+                {copied ? '已复制' : '复制'}
               </button>
               <a className="dsh-imessage-button dsh-imessage-primary" href={`sms:${assigned}`}>
                 Text this number
@@ -336,7 +336,7 @@ function LineCard({
                 disabled={pending !== undefined}
                 onClick={() => { void controller.retryRuntime() }}
               >
-                {pending === 'retry-runtime' ? 'Starting…' : 'Retry listener'}
+                {pending === 'retry-runtime' ? '正在启动…' : '重连监听器'}
               </button>
             ) : null}
             <button
@@ -345,7 +345,7 @@ function LineCard({
               disabled={pending !== undefined || !state.settingsWritable || !state.credentialWritable}
               onClick={disconnect}
             >
-              {pending === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}
+              {pending === 'disconnect' ? '正在断开…' : '断开'}
             </button>
           </div>
           <CommandReference />
@@ -366,16 +366,16 @@ function CardTitle({ number, title, status }: { number: string; title: string; s
 
 function CommandReference(): ReactNode {
   const commands = [
-    ['/help', 'Show command help'],
-    ['/new', 'Start a new DSH session'],
-    ['/sessions [page]', 'List same-workspace root sessions'],
-    ['/switch <index|session-id>', 'Change the active session'],
-    ['/status', 'Show listener and session status'],
-    ['/stop or /cancel', 'Stop the active turn'],
-    ['/approve <request-id>', 'Approve a correlated request once'],
-    ['/deny <request-id>', 'Deny a correlated request'],
-    ['/answer <request-id> <answer>', 'Answer a correlated question'],
-    ['//text', 'Send a normal prompt beginning with /'],
+    ['/help', '查看命令帮助'],
+    ['/new', '开一个新的 DSH 会话'],
+    ['/sessions [page]', '列出同工作区的根会话'],
+    ['/switch <index|session-id>', '切换当前会话'],
+    ['/status', '查看监听器与会话状态'],
+    ['/stop or /cancel', '中断当前回合'],
+    ['/approve <request-id>', '批准一次对应请求'],
+    ['/deny <request-id>', '拒绝对应请求'],
+    ['/answer <request-id> <answer>', '回答对应提问'],
+    ['//text', '发一条以 / 开头的普通消息'],
   ] as const
   return (
     <details className="dsh-imessage-commands">
@@ -436,7 +436,7 @@ function provisioningLabel(state: ImessagePluginState): string {
 
 function runtimeLabel(runtime: RuntimeView): string {
   switch (runtime.phase) {
-    case 'listening': return 'Listening'
+    case 'listening': return '监听中'
     case 'starting': return 'Starting'
     case 'retrying': return `Reconnecting (${runtime.attempt})`
     case 'failed': return 'Listener failed'
