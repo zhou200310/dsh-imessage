@@ -9,6 +9,8 @@
 
 > 本仓库是 [photon-hq/dsh-imessage](https://github.com/photon-hq/dsh-imessage) 的 **DeepSeek Harness 0.2.2 兼容适配版**：上游 peer 依赖锁死在 `0.1.0-rc.6`，在 `0.2.2-rc.1` 上装了也不激活、收到消息也不回。这里保留了上游全部功能，把断掉的 API 逐个接回来，并补上多模态与语音，现在是端到端可用的。
 
+> **设置页已全中文**（v0.3.2 起）：授权 Photon、填写发送号码、查托管号、命令参考、状态标签全部汉化，不再夹杂英文。
+
 ```
 iPhone「信息」 → Photon → Spectrum → DSH 插件 → DSH 会话
                                               ↓
