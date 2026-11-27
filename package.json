@@ -1,7 +1,7 @@
 {
   "name": "dsh-imessage",
-  "version": "0.3.2",
-  "description": "iMessage transport for DeepSeek Harness 0.2.2 (Photon/Spectrum), adapted from photon-hq/dsh-imessage",
+  "version": "0.3.3",
+  "description": "iMessage transport for DeepSeek Harness 0.2.3 (Photon/Spectrum), adapted from photon-hq/dsh-imessage",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -21,7 +21,8 @@
     "dsh-plugin"
   ],
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": "^0.2.2-rc.1 || ^0.2.3-alpha.2"
   },
   "publishConfig": {
     "access": "public"

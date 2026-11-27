@@ -195,3 +195,63 @@ iPhone 设置 → 相机 → 格式 → **兼容性最佳**（JPEG）；或发�
 - 转换失败只记日志，仍然按原样投递，不阻断消息
 
 系统依赖：ImageMagick 带 libheif（本机 `convert -list format` 里 `HEIC rw+`）。
+
+---
+
+## 追加：`[音频: /abs/path]` 发成真·语音条（2026-11-21）
+
+生产环境装的还是 **0.3.0**（`profiles/web/node_modules/dsh-imessage`），它只认 `[语音: 文本]`，
+不认 `[音频: 路径]` —— 唱歌产出的 m4a 会被当普通文字发出去（用户只看到一串路径）。
+0.3.2 也只在 `sendAudioFiles()` 里用 `attachment()`，是**文件附件**，不是语音条。
+
+### 补丁（lib/index.js → send() / sendAudioFiles()）
+1. `send()` 里先用正则 `/\[音频:\s*([^\]\n]+?)\s*\]/gu` 把路径抽出来并从正文剔除，
+   再交给 `splitVoiceMarkers()` 处理剩下的 `[语音:]`
+2. 新增 `sendAudioFiles(channel, paths)`：`existsSync` 校验 → `probeAudioSeconds` 取时长 →
+   `channel.send(voice(path, { mimeType, duration }))`（**voice，不是 attachment**）
+   - `.mp3` → `audio/mpeg`，`.wav` → `audio/wav`，其余（m4a/aac）→ `audio/mp4`
+3. 调用顺序：正文 → 表情 → 音频文件 → 语音条
+
+### 落地要点
+- 备份：`lib/index.js.bak-<时间戳>`（改前自动留一份）
+- 改完 `node --check lib/index.js`，**冷启动 dsh** 才生效（不能热重载，会拖垮 GUI）
+- **重装/升级插件会覆盖此补丁**，照本节重建
+- 唱歌产物路径：`media/sing/*.m4a`，由 `tools/fish-sing.py` 生成
+
+---
+
+## 追加：DSH 0.2.3-alpha.2 兼容（2026-11-27，v0.3.3）
+
+### 现象
+升级到 `0.2.3-alpha.2` 后启动日志出现
+`dsh: skipping profile bundle "dsh-imessage": Plugin dsh-imessage@0.3.0 is incompatible with dsh 0.2.3-alpha.2`，
+插件完全不加载，iMessage 通道断。
+
+### 原因
+`peerDependencies` 里 18 个 `@deepseek-ai/dsh-*` 全部锁死 `0.2.2-rc.1`。
+DSH 的 `evaluatePluginCompatibility()`（`@deepseek-ai/dsh-app-boot`）在**没有 `engines.dsh`** 时，
+逐个校验名字以 `@deepseek-ai/dsh` 开头的 peer，任一 `semver.satisfies` 不满足 → 整包跳过。
+
+### 修法（最小改动）
+在 `package.json` 加：
+
+```json
+"engines": { "dsh": "^0.2.2-rc.1 || ^0.2.3-alpha.2" }
+```
+
+`engines.dsh` 存在时**独占判定**，peer 全部忽略，所以老版本 0.2.2 和新版本 0.2.3 都能装。
+（依据：dsh-doc skill 的 `references/dsh-version.md`）
+
+### 0.2.3 的附带变化
+- `@deepseek-ai/dsh-client-runtime`、`dsh-client-ui-slots`、`dsh-agent-presets` 三个包在 0.2.3 已不存在。
+  本插件代码没有 import 它们（只出现在 peer 和 `dsh.client.inject`），所以 host 侧不受影响；
+  设置页若加载异常，优先检查 `dsh.client.inject` 这三个名字。
+- `lib/` 被 gitignore，产物只在 release 的 tgz 里。
+
+### 顺手修
+- `[音频: /abs/path]` 从 `attachment()` 改回 `voice()`（0.3.2 退回成文件附件，语音条效果丢失）。
+- 本地已安装副本若不想重装，可直接改 `profiles/web/node_modules/dsh-imessage/package.json` 的 `engines`。
+
+### 验证
+- `evaluatePluginCompatibility()` 实测：`dsh-imessage 0.3.3 => OK`
+- 重启 dsh 后日志 **0 次 skipping**，`imesg-diag` 正常收消息
